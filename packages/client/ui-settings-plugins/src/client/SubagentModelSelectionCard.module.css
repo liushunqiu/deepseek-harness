@@ -175,3 +175,25 @@
   font-size: 11px;
   color: var(--dsw-alias-label-tertiary);
 }
+
+.defaultRoute {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.defaultRoute select {
+  max-width: 320px;
+  padding: 5px 8px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--dsw-alias-label-primary);
+}
+
+.defaultRoute select:disabled {
+  opacity: 0.5;
+  cursor: default;
+}

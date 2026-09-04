@@ -10,6 +10,7 @@ import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import * as mock from './scripted-provider.ts'
 import * as tool from '../src/index.ts'
+import type { AllowedModelRoute } from '../src/model-selection.ts'
 import SubagentModelSelectionConfig from '../src/model-selection-settings.ts'
 
 /** Shared non-aborted tool signal for package-local integration tests. */
@@ -30,6 +31,13 @@ let setupAgentCounter = 0
 type SetupConfig = tool.Config & {
   withModelSelection?: boolean
   parentAgentOptions?: AgentOptions
+  defaultRoute?: AllowedModelRoute
+  arbiterRoute?: AllowedModelRoute
+  /**
+   * Install a companion `subagent_arbiter` row with `role: arbiter` beside the
+   * configured row, so a test can compare the two roles' routes on one Agent.
+   */
+  withArbiterRow?: boolean
 }
 
 const TEST_ALLOWED_MODELS = [
@@ -43,11 +51,13 @@ const TEST_ALLOWED_MODELS = [
 
 export async function setup(toolConfig: SetupConfig, mockConfig: Partial<mock.Config> = {}): Promise<Context> {
   const ctx = new Context()
-  const { withModelSelection, parentAgentOptions, ...config } = toolConfig
+  const { withModelSelection, parentAgentOptions, defaultRoute, arbiterRoute, withArbiterRow, ...config } = toolConfig
   if (withModelSelection === true) {
     await ctx.plugin(SubagentModelSelectionConfig, {
       enabled: true,
       allowedModels: TEST_ALLOWED_MODELS,
+      ...defaultRoute === undefined ? {} : { defaultRoute },
+      ...arbiterRoute === undefined ? {} : { arbiterRoute },
     })
     await mountAgentLoopTestDependencies(ctx)
     await ctx.plugin(SessionProjectionRegistry)
@@ -60,6 +70,14 @@ export async function setup(toolConfig: SetupConfig, mockConfig: Partial<mock.Co
       ...parentAgentOptions !== undefined ? { agentOptions: parentAgentOptions } : {},
       setup: async (agentCtx) => {
         await agentCtx.plugin(tool, { ...config, modelSelectionSettings: true })
+        if (withArbiterRow === true) {
+          await agentCtx.plugin(tool, {
+            ...config,
+            toolName: 'subagent_arbiter',
+            role: 'arbiter',
+            modelSelectionSettings: true,
+          })
+        }
       },
     })
     setupAgents.set(ctx, handle.agent)
@@ -93,11 +111,11 @@ export function modelSelectionSetupAgent(ctx: Context): Agent {
 
 let callCounter = 0
 
-/** Execute the registered subagent tool through the real ToolRuntime pipeline. */
+/** Execute one registered delegation tool through the real ToolRuntime pipeline. */
 export function callSubagent(
   ctx: Context,
   args: unknown,
-  over: { agent?: Agent | undefined; signal?: AbortSignal } = {},
+  over: { agent?: Agent | undefined; signal?: AbortSignal; toolName?: string } = {},
 ) {
   // Distinguish "no override" (use a default agent) from an explicit
   // `{ agent: undefined }` (test the no-agent path). Under
@@ -106,7 +124,7 @@ export function callSubagent(
   return ctx.tools.execute({
     signal: testToolSignal,
     callId: ToolCallId(`call-${++callCounter}`),
-    name: 'subagent',
+    name: over.toolName ?? 'subagent',
     arguments: args,
     ...agent ? { agent } : {},
     ...over.signal ? { signal: over.signal } : {},

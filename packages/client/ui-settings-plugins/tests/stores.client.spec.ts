@@ -29,12 +29,16 @@ function acceptWrites<T>(host: StubSettingsScope<T>): void {
   })
   host.mutate.mockImplementation((ops: readonly SettingsPathOpView[]) => {
     const value = { ...section() }
-    const user = { ...layer() }
+    const base = host.scope.getSnapshot().base as Record<string, unknown> | undefined
+    const cleared = new Set(ops.filter(op => op.op !== 'set').map(op => op.path[0]!))
+    const user = Object.fromEntries(Object.entries(layer()).filter(([key]) => !cleared.has(key)))
     for (const op of ops) {
       const field = op.path[0]!
       if (op.op === 'set') {
         value[field] = op.value
         user[field] = op.value
+      } else {
+        value[field] = base?.[field]
       }
     }
     host.publish({ value: value as T, user })
@@ -583,6 +587,363 @@ describe('SubagentModelSelectionCardController', () => {
     })
   })
 
+  it('stages the arbiter route and saves it beside the default route', async () => {
+    const host = stubSettingsScope<SubagentModelSelectionSettings>()
+    acceptWrites(host)
+    const models = modelsApi({
+      groups: [{ id: 'alpha', name: 'Alpha API', models: [{ id: 'fast', name: 'Fast' }, { id: 'deep', name: 'Deep' }] }],
+    })
+    const controller = new SubagentModelSelectionCardController(host.scope, models.ctx)
+    host.publish({
+      status: 'ready', writable: true, revision: 8,
+      value: { enabled: true, allowedModels: [{ provider: 'alpha', model: 'fast' }] }, user: {},
+    })
+    const face = controller.inject()
+    const state = () => face.hooks.subagentModelSelectionCard.getSnapshot()
+    await vi.waitFor(() => { expect(state().catalogStatus).toBe('ready') })
+    expect(state().arbiterRoute).toBeUndefined()
+
+    face.toggleModel('alpha\0deep')
+    face.setArbiterRoute('alpha\0deep')
+    expect(state()).toMatchObject({
+      dirty: true,
+      arbiterRoute: { provider: 'alpha', model: 'deep' },
+    })
+
+    face.save()
+    await vi.waitFor(() => {
+      expect(host.mutate).toHaveBeenCalledWith([
+        { op: 'set', path: ['enabled'], value: true },
+        {
+          op: 'set',
+          path: ['allowedModels'],
+          value: [{ provider: 'alpha', model: 'fast' }, { provider: 'alpha', model: 'deep' }],
+        },
+        { op: 'set', path: ['arbiterRoute'], value: { provider: 'alpha', model: 'deep' } },
+      ], 8)
+    })
+    expect(state()).toMatchObject({ dirty: false, failed: false, saving: false })
+  })
+
+  it('drops a staged arbiter route when its route is denied', async () => {
+    const host = stubSettingsScope<SubagentModelSelectionSettings>()
+    acceptWrites(host)
+    const models = modelsApi({
+      groups: [{ id: 'alpha', name: 'Alpha API', models: [{ id: 'fast', name: 'Fast' }, { id: 'deep', name: 'Deep' }] }],
+    })
+    const controller = new SubagentModelSelectionCardController(host.scope, models.ctx)
+    host.publish({
+      status: 'ready', writable: true, revision: 9,
+      value: {
+        enabled: true,
+        allowedModels: [{ provider: 'alpha', model: 'fast' }, { provider: 'alpha', model: 'deep' }],
+        arbiterRoute: { provider: 'alpha', model: 'deep' },
+      },
+      user: {},
+    })
+    const face = controller.inject()
+    const state = () => face.hooks.subagentModelSelectionCard.getSnapshot()
+    await vi.waitFor(() => { expect(state().catalogStatus).toBe('ready') })
+    expect(state().arbiterRoute).toEqual({ provider: 'alpha', model: 'deep' })
+
+    // Denying the arbiter route's model must not leave an unauthorized route staged.
+    face.toggleModel('alpha\0deep')
+    expect(state().arbiterRoute).toBeUndefined()
+
+    face.save()
+    await vi.waitFor(() => {
+      expect(host.mutate).toHaveBeenCalledWith([
+        { op: 'set', path: ['enabled'], value: true },
+        { op: 'set', path: ['allowedModels'], value: [{ provider: 'alpha', model: 'fast' }] },
+        { op: 'unset', path: ['arbiterRoute'] },
+      ], 9)
+    })
+  })
+
+  it('stages the default route among authorized models and saves it as a field write', async () => {
+    const host = stubSettingsScope<SubagentModelSelectionSettings>()
+    acceptWrites(host)
+    const models = modelsApi({
+      groups: [{ id: 'alpha', name: 'Alpha API', models: [{ id: 'fast', name: 'Fast' }] }],
+    })
+    const controller = new SubagentModelSelectionCardController(host.scope, models.ctx)
+    host.publish({
+      status: 'ready', writable: true, revision: 7,
+      value: { enabled: true, allowedModels: [{ provider: 'alpha', model: 'fast' }] }, user: {},
+    })
+    const face = controller.inject()
+    const state = () => face.hooks.subagentModelSelectionCard.getSnapshot()
+    await vi.waitFor(() => { expect(state().catalogStatus).toBe('ready') })
+    expect(state().defaultRoute).toBeUndefined()
+
+    face.setDefaultRoute('alpha\0fast')
+    expect(state()).toMatchObject({
+      dirty: true,
+      defaultRoute: { provider: 'alpha', model: 'fast' },
+    })
+
+    face.save()
+    await vi.waitFor(() => {
+      expect(host.mutate).toHaveBeenCalledWith([
+        { op: 'set', path: ['enabled'], value: true },
+        { op: 'set', path: ['allowedModels'], value: [{ provider: 'alpha', model: 'fast' }] },
+        { op: 'set', path: ['defaultRoute'], value: { provider: 'alpha', model: 'fast' } },
+      ], 7)
+    })
+    expect(state()).toMatchObject({ dirty: false, failed: false, saving: false })
+  })
+
+  it('replaces a stored default and drops it when its route is denied', async () => {
+    const host = stubSettingsScope<SubagentModelSelectionSettings>()
+    acceptWrites(host)
+    const models = modelsApi({
+      groups: [{ id: 'alpha', name: 'Alpha API', models: [{ id: 'fast', name: 'Fast' }, { id: 'deep', name: 'Deep' }] }],
+    })
+    const controller = new SubagentModelSelectionCardController(host.scope, models.ctx)
+    host.publish({
+      status: 'ready', writable: true, revision: 7,
+      value: {
+        enabled: true,
+        allowedModels: [{ provider: 'alpha', model: 'fast' }],
+        defaultRoute: { provider: 'alpha', model: 'fast' },
+      },
+      user: {},
+    })
+    const face = controller.inject()
+    const state = () => face.hooks.subagentModelSelectionCard.getSnapshot()
+    await vi.waitFor(() => { expect(state().catalogStatus).toBe('ready') })
+    expect(state().defaultRoute).toEqual({ provider: 'alpha', model: 'fast' })
+
+    face.toggleModel('alpha\0deep')
+    face.setDefaultRoute('alpha\0deep')
+    // Reverting the draft to the stored default stages no default-route write.
+    face.setDefaultRoute('alpha\0fast')
+    face.save()
+    await vi.waitFor(() => {
+      expect(host.mutate).toHaveBeenCalledWith([
+        { op: 'set', path: ['enabled'], value: true },
+        {
+          op: 'set',
+          path: ['allowedModels'],
+          value: [{ provider: 'alpha', model: 'fast' }, { provider: 'alpha', model: 'deep' }],
+        },
+      ], 7)
+    })
+    expect(state()).toMatchObject({
+      dirty: false,
+      defaultRoute: { provider: 'alpha', model: 'fast' },
+    })
+
+    face.setDefaultRoute('alpha\0deep')
+    face.save()
+    await vi.waitFor(() => {
+      expect(host.mutate).toHaveBeenLastCalledWith([
+        { op: 'set', path: ['enabled'], value: true },
+        {
+          op: 'set',
+          path: ['allowedModels'],
+          value: [{ provider: 'alpha', model: 'fast' }, { provider: 'alpha', model: 'deep' }],
+        },
+        { op: 'set', path: ['defaultRoute'], value: { provider: 'alpha', model: 'deep' } },
+      ], 7)
+    })
+    expect(state()).toMatchObject({
+      dirty: false,
+      defaultRoute: { provider: 'alpha', model: 'deep' },
+    })
+
+    // Denying the default route stages "no default"; re-adding it does not resurrect one.
+    face.toggleModel('alpha\0deep')
+    expect(state()).toMatchObject({ dirty: true, defaultRoute: undefined })
+    face.toggleModel('alpha\0deep')
+    expect(state()).toMatchObject({ dirty: true, defaultRoute: undefined, invalid: false })
+    face.discard()
+    expect(state()).toMatchObject({
+      dirty: false,
+      defaultRoute: { provider: 'alpha', model: 'deep' },
+    })
+  })
+
+  it('ignores arbiter staging while selection is off and skips an unchanged write', async () => {
+    const host = stubSettingsScope<SubagentModelSelectionSettings>()
+    acceptWrites(host)
+    const models = modelsApi({
+      groups: [{ id: 'alpha', name: 'Alpha API', models: [{ id: 'fast', name: 'Fast' }] }],
+    })
+    const controller = new SubagentModelSelectionCardController(host.scope, models.ctx)
+    host.publish({
+      status: 'ready', writable: true, revision: 11,
+      value: {
+        enabled: false,
+        allowedModels: [{ provider: 'alpha', model: 'fast' }],
+      },
+      user: {},
+    })
+    const face = controller.inject()
+    const state = () => face.hooks.subagentModelSelectionCard.getSnapshot()
+
+    // Selection is off: staging an arbiter route must not mark the card dirty.
+    face.setArbiterRoute('alpha\0fast')
+    expect(state()).toMatchObject({ dirty: false, arbiterRoute: undefined })
+
+    // A stored arbiter route equal to the desired one leaves the card clean, so
+    // an unchanged save has nothing to write.
+    host.publish({
+      status: 'ready', writable: true, revision: 12,
+      value: {
+        enabled: true,
+        allowedModels: [{ provider: 'alpha', model: 'fast' }],
+        arbiterRoute: { provider: 'alpha', model: 'fast' },
+      },
+      user: {},
+    })
+    face.setArbiterRoute('alpha\0fast')
+    expect(state()).toMatchObject({ dirty: false, arbiterRoute: { provider: 'alpha', model: 'fast' } })
+    face.save()
+    expect(host.mutate).not.toHaveBeenCalled()
+
+    // Clearing the staged arbiter route drops the stored one on save.
+    face.setArbiterRoute(undefined)
+    expect(state()).toMatchObject({ dirty: true, arbiterRoute: undefined })
+    face.save()
+    await vi.waitFor(() => {
+      expect(host.mutate).toHaveBeenCalledWith([
+        { op: 'set', path: ['enabled'], value: true },
+        { op: 'set', path: ['allowedModels'], value: [{ provider: 'alpha', model: 'fast' }] },
+        { op: 'unset', path: ['arbiterRoute'] },
+      ], 12)
+    })
+
+    // An unchanged arbiter route stages no field write even when another
+    // field changes, so a save cannot rewrite what the user did not touch.
+    // Deny a model the arbiter route does NOT point at, leaving it authorized.
+    host.mutate.mockClear()
+    host.publish({
+      status: 'ready', writable: true, revision: 14,
+      value: {
+        enabled: true,
+        allowedModels: [{ provider: 'alpha', model: 'fast' }, { provider: 'alpha', model: 'deep' }],
+        arbiterRoute: { provider: 'alpha', model: 'fast' },
+      },
+      user: {},
+    })
+    await vi.waitFor(() => { expect(state().catalogStatus).toBe('ready') })
+    face.toggleModel('alpha\0deep')
+    expect(state().arbiterRoute).toEqual({ provider: 'alpha', model: 'fast' })
+    face.save()
+    await vi.waitFor(() => {
+      expect(host.mutate).toHaveBeenCalledWith([
+        { op: 'set', path: ['enabled'], value: true },
+        { op: 'set', path: ['allowedModels'], value: [{ provider: 'alpha', model: 'fast' }] },
+      ], 14)
+    })
+  })
+
+  it('drops a stored arbiter route when selection is disabled', async () => {
+    const host = stubSettingsScope<SubagentModelSelectionSettings>()
+    acceptWrites(host)
+    const models = modelsApi({
+      groups: [{ id: 'alpha', name: 'Alpha API', models: [{ id: 'fast', name: 'Fast' }] }],
+    })
+    const controller = new SubagentModelSelectionCardController(host.scope, models.ctx)
+    host.publish({
+      status: 'ready', writable: true, revision: 13,
+      value: {
+        enabled: true,
+        allowedModels: [{ provider: 'alpha', model: 'fast' }],
+        arbiterRoute: { provider: 'alpha', model: 'fast' },
+      },
+      user: {},
+    })
+    const face = controller.inject()
+    const state = () => face.hooks.subagentModelSelectionCard.getSnapshot()
+    await vi.waitFor(() => { expect(state().catalogStatus).toBe('ready') })
+
+    face.toggleEnabled()
+    face.save()
+    await vi.waitFor(() => {
+      expect(host.mutate).toHaveBeenCalledWith([
+        { op: 'set', path: ['enabled'], value: false },
+        { op: 'set', path: ['allowedModels'], value: [{ provider: 'alpha', model: 'fast' }] },
+        { op: 'unset', path: ['arbiterRoute'] },
+      ], 13)
+    })
+  })
+
+  it('drops a stored default when selection is disabled or the user picks none', async () => {
+    const host = stubSettingsScope<SubagentModelSelectionSettings>()
+    acceptWrites(host)
+    const models = modelsApi({
+      groups: [{ id: 'alpha', name: 'Alpha API', models: [{ id: 'fast', name: 'Fast' }] }],
+    })
+    const controller = new SubagentModelSelectionCardController(host.scope, models.ctx)
+    host.publish({
+      status: 'ready', writable: true, revision: 7,
+      value: {
+        enabled: true,
+        allowedModels: [{ provider: 'alpha', model: 'fast' }],
+        defaultRoute: { provider: 'alpha', model: 'fast' },
+      },
+      user: {},
+    })
+    const face = controller.inject()
+    const state = () => face.hooks.subagentModelSelectionCard.getSnapshot()
+    await vi.waitFor(() => { expect(state().catalogStatus).toBe('ready') })
+
+    face.toggleEnabled()
+    face.save()
+    await vi.waitFor(() => {
+      expect(host.mutate).toHaveBeenCalledWith([
+        { op: 'set', path: ['enabled'], value: false },
+        { op: 'set', path: ['allowedModels'], value: [{ provider: 'alpha', model: 'fast' }] },
+        { op: 'unset', path: ['defaultRoute'] },
+      ], 7)
+    })
+    expect(state()).toMatchObject({ enabled: false, dirty: false, defaultRoute: undefined })
+
+    face.toggleEnabled()
+    face.setDefaultRoute('alpha\0fast')
+    face.save()
+    await vi.waitFor(() => {
+      expect(host.mutate).toHaveBeenLastCalledWith([
+        { op: 'set', path: ['enabled'], value: true },
+        { op: 'set', path: ['allowedModels'], value: [{ provider: 'alpha', model: 'fast' }] },
+        { op: 'set', path: ['defaultRoute'], value: { provider: 'alpha', model: 'fast' } },
+      ], 7)
+    })
+    expect(state()).toMatchObject({ enabled: true, dirty: false })
+
+    face.setDefaultRoute(undefined)
+    expect(state()).toMatchObject({ dirty: true, defaultRoute: undefined })
+    face.save()
+    await vi.waitFor(() => {
+      expect(host.mutate).toHaveBeenLastCalledWith([
+        { op: 'set', path: ['enabled'], value: true },
+        { op: 'set', path: ['allowedModels'], value: [{ provider: 'alpha', model: 'fast' }] },
+        { op: 'unset', path: ['defaultRoute'] },
+      ], 7)
+    })
+    expect(state()).toMatchObject({ enabled: true, dirty: false, defaultRoute: undefined })
+  })
+
+  it('ignores default-route staging while selection is off or read-only', async () => {
+    const host = stubSettingsScope<SubagentModelSelectionSettings>()
+    const models = modelsApi({
+      groups: [{ id: 'alpha', name: 'Alpha API', models: [{ id: 'fast', name: 'Fast' }] }],
+    })
+    const controller = new SubagentModelSelectionCardController(host.scope, models.ctx)
+    host.publish({
+      status: 'ready', writable: true, revision: 7,
+      value: { enabled: false, allowedModels: [{ provider: 'alpha', model: 'fast' }] }, user: {},
+    })
+    const face = controller.inject()
+    const state = () => face.hooks.subagentModelSelectionCard.getSnapshot()
+    await vi.waitFor(() => { expect(state().catalogStatus).toBe('idle') })
+
+    face.setDefaultRoute('alpha\0fast')
+    expect(state()).toMatchObject({ dirty: false, defaultRoute: undefined, enabled: false })
+  })
+
   it('reports a directory error and retries it', async () => {
     const host = stubSettingsScope<SubagentModelSelectionSettings>()
     const models = modelsApi({ error: 'offline' })
@@ -793,6 +1154,7 @@ describe('SubagentModelSelectionCardController', () => {
     expect(face.hooks.subagentModelSelectionCard.getSnapshot().saving).toBe(true)
     face.toggleEnabled()
     face.toggleModel('alpha\0fast')
+    face.setDefaultRoute('alpha\0fast')
     face.save()
     face.discard()
     controller.dispose()

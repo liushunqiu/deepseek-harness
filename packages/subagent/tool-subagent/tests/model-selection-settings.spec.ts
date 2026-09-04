@@ -20,12 +20,18 @@ import SubagentModelSelectionConfig, {
   SUBAGENT_MODEL_SELECTION_SETTINGS_NAMESPACE,
 } from '../src/model-selection-settings.ts'
 import {
+  recordSubagentModelSelection,
   subagentModelSelectionPolicy,
   subagentModelSelectionProjectionDefinition,
 } from '../src/model-selection-state.ts'
 import { text } from './harness.ts'
 
-const ALLOWED_MODELS = [{ provider: 'alpha', model: 'fast-model' }]
+const ALLOWED_MODELS = [
+  { provider: 'alpha', model: 'fast-model' },
+  { provider: 'alpha', model: 'review-model' },
+]
+const DEFAULT_ROUTE = ALLOWED_MODELS[0]!
+const ARBITER_ROUTE = ALLOWED_MODELS[1]!
 
 /** Writable in-memory settings provider for the package integration. */
 class MemorySettings extends SettingsProvider {
@@ -110,6 +116,75 @@ describe('SubagentModelSelectionConfig', () => {
     await ctx.fiber.dispose()
   })
 
+  it('carries a default route through composition, the user layer, and detached reads', async () => {
+    const ctx = new Context()
+    await ctx.plugin(MemorySettings)
+    await ctx.plugin(SubagentModelSelectionConfig, {
+      enabled: true,
+      allowedModels: ALLOWED_MODELS,
+      defaultRoute: DEFAULT_ROUTE,
+    })
+    expect(ctx.subagentModelSelection.current()).toEqual({
+      enabled: true,
+      allowedModels: ALLOWED_MODELS,
+      defaultRoute: DEFAULT_ROUTE,
+    })
+
+    const returned = ctx.subagentModelSelection.current()
+    const routes: { provider: string; model: string }[] = returned.allowedModels
+    routes[0]!.provider = 'mutated'
+    const route: { provider: string; model: string } | undefined = returned.defaultRoute
+    if (route !== undefined) route.provider = 'mutated'
+    expect(ctx.subagentModelSelection.current()).toEqual({
+      enabled: true,
+      allowedModels: ALLOWED_MODELS,
+      defaultRoute: DEFAULT_ROUTE,
+    })
+    await ctx.fiber.dispose()
+  })
+
+  it('rejects a default route while disabled, outside the allowlist, or malformed', async () => {
+    const ctx = new Context()
+    await ctx.plugin(MemorySettings)
+    await ctx.plugin(SubagentModelSelectionConfig)
+
+    await expect(ctx.settings.update(SUBAGENT_MODEL_SELECTION_SETTINGS_NAMESPACE, {
+      defaultRoute: DEFAULT_ROUTE,
+    })).rejects.toThrow('a subagent default route requires enabled subagent model selection')
+    expect(ctx.subagentModelSelection.current()).toEqual({ enabled: false, allowedModels: [] })
+
+    await ctx.settings.update(SUBAGENT_MODEL_SELECTION_SETTINGS_NAMESPACE, {
+      enabled: true,
+      allowedModels: ALLOWED_MODELS,
+    })
+    await expect(ctx.settings.update(SUBAGENT_MODEL_SELECTION_SETTINGS_NAMESPACE, {
+      defaultRoute: { provider: 'alpha', model: 'other-model' },
+    })).rejects.toThrow('subagent default route "alpha/other-model" is not an allowed model')
+
+    await ctx.settings.update(SUBAGENT_MODEL_SELECTION_SETTINGS_NAMESPACE, {
+      defaultRoute: DEFAULT_ROUTE,
+    })
+    expect(ctx.subagentModelSelection.current()).toEqual({
+      enabled: true,
+      allowedModels: ALLOWED_MODELS,
+      defaultRoute: DEFAULT_ROUTE,
+    })
+    await ctx.fiber.dispose()
+  })
+
+  it('rejects a malformed default route at direct construction', () => {
+    const ctx = new Context()
+    try {
+      expect(() => new SubagentModelSelectionConfig(ctx, {
+        enabled: true,
+        allowedModels: ALLOWED_MODELS,
+        defaultRoute: { provider: '', model: 'fast-model' },
+      })).toThrow('requires non-empty provider and model ids')
+    } finally {
+      void ctx.fiber.dispose()
+    }
+  })
+
   it('rejects duplicate routes, enabled empty settings, and an empty durable policy', async () => {
     const ctx = new Context()
     await ctx.plugin(MemorySettings)
@@ -157,7 +232,8 @@ describe('SubagentModelSelectionConfig', () => {
       allowedModels: ALLOWED_MODELS,
     })
     const enabled = await createAgent(ctx, 'enabled')
-    expect(subagentModelSelectionPolicy(ctx.sessionProjections, enabled.session)).toEqual(ALLOWED_MODELS)
+    expect(subagentModelSelectionPolicy(ctx.sessionProjections, enabled.session))
+      .toEqual({ allowedModels: ALLOWED_MODELS })
     expect(selectable(ctx, enabled)).toBe(true)
     expect(selectable(ctx, disabled)).toBe(false)
 
@@ -297,7 +373,8 @@ describe('SubagentModelSelectionConfig', () => {
       meta: { parentSession: parent.id, origin: 'subagent' },
     })
     expect(selectable(ctx, child)).toBe(true)
-    expect(subagentModelSelectionPolicy(ctx.sessionProjections, child.session)).toEqual(ALLOWED_MODELS)
+    expect(subagentModelSelectionPolicy(ctx.sessionProjections, child.session))
+      .toEqual({ allowedModels: ALLOWED_MODELS })
 
     const orphan = await createAgent(ctx, 'orphan', {
       meta: { parentSession: SessionId('missing-parent'), origin: 'subagent' },
@@ -321,6 +398,124 @@ describe('SubagentModelSelectionConfig', () => {
     const resumedDisabled = await createAgent(ctx, 'resumed-disabled', { seed: oldSeed.snapshotEvents() })
     expect(selectable(ctx, resumedDisabled)).toBe(false)
     expect(subagentModelSelectionPolicy(ctx.sessionProjections, resumedDisabled.session)).toBeUndefined()
+    await ctx.fiber.dispose()
+  })
+
+  it('records the default route in the durable policy and child sessions inherit it', async () => {
+    const ctx = await boot()
+    await ctx.settings.update(SUBAGENT_MODEL_SELECTION_SETTINGS_NAMESPACE, {
+      enabled: true,
+      allowedModels: ALLOWED_MODELS,
+      defaultRoute: DEFAULT_ROUTE,
+    })
+    const parent = await createAgent(ctx, 'default-parent')
+    expect(subagentModelSelectionPolicy(ctx.sessionProjections, parent.session)).toEqual({
+      allowedModels: ALLOWED_MODELS,
+      defaultRoute: DEFAULT_ROUTE,
+    })
+    const child = await createAgent(ctx, 'default-child', {
+      meta: { parentSession: parent.id, origin: 'subagent' },
+    })
+    expect(subagentModelSelectionPolicy(ctx.sessionProjections, child.session)).toEqual({
+      allowedModels: ALLOWED_MODELS,
+      defaultRoute: DEFAULT_ROUTE,
+    })
+    await ctx.fiber.dispose()
+  })
+
+  it('validates the arbiter route against enablement and the allowlist', async () => {
+    const ctx = await boot()
+    await expect(ctx.settings.update(SUBAGENT_MODEL_SELECTION_SETTINGS_NAMESPACE, {
+      enabled: true,
+      allowedModels: ALLOWED_MODELS,
+      arbiterRoute: { provider: 'alpha', model: 'other-model' },
+    })).rejects.toThrow('arbiter route "alpha/other-model" is not an allowed model')
+
+    await ctx.settings.update(SUBAGENT_MODEL_SELECTION_SETTINGS_NAMESPACE, {
+      enabled: true,
+      allowedModels: ALLOWED_MODELS,
+    })
+    await expect(ctx.settings.update(SUBAGENT_MODEL_SELECTION_SETTINGS_NAMESPACE, {
+      enabled: false,
+      allowedModels: ALLOWED_MODELS,
+      arbiterRoute: DEFAULT_ROUTE,
+    })).rejects.toThrow('a subagent arbiter route requires enabled subagent model selection')
+    await ctx.fiber.dispose()
+  })
+
+  it('records the arbiter route in the durable policy and child sessions inherit it', async () => {
+    const ctx = await boot()
+    await ctx.settings.update(SUBAGENT_MODEL_SELECTION_SETTINGS_NAMESPACE, {
+      enabled: true,
+      allowedModels: ALLOWED_MODELS,
+      defaultRoute: DEFAULT_ROUTE,
+      arbiterRoute: ARBITER_ROUTE,
+    })
+    const parent = await createAgent(ctx, 'arbiter-parent')
+    expect(subagentModelSelectionPolicy(ctx.sessionProjections, parent.session)).toEqual({
+      allowedModels: ALLOWED_MODELS,
+      defaultRoute: DEFAULT_ROUTE,
+      arbiterRoute: ARBITER_ROUTE,
+    })
+    const child = await createAgent(ctx, 'arbiter-child', {
+      meta: { parentSession: parent.id, origin: 'subagent' },
+    })
+    expect(subagentModelSelectionPolicy(ctx.sessionProjections, child.session)).toEqual({
+      allowedModels: ALLOWED_MODELS,
+      defaultRoute: DEFAULT_ROUTE,
+      arbiterRoute: ARBITER_ROUTE,
+    })
+    await ctx.fiber.dispose()
+  })
+
+  it('rejects a durable arbiter route outside the policy', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionProjectionRegistry)
+    ctx.sessionProjections.register(subagentModelSelectionProjectionDefinition)
+    const session = Session.create(SessionId('policy-arbiter-outside'))
+    session.append('subagent/model-selection-policy', {
+      allowedModels: ALLOWED_MODELS,
+      arbiterRoute: { provider: 'alpha', model: 'other-model' },
+    })
+    expect(() => subagentModelSelectionPolicy(ctx.sessionProjections, session))
+      .toThrow('arbiter route "alpha/other-model" is not an allowed model')
+    await ctx.fiber.dispose()
+  })
+
+  it('omits both route keys from the event when the setting sets none', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionProjectionRegistry)
+    ctx.sessionProjections.register(subagentModelSelectionProjectionDefinition)
+    const session = Session.create(SessionId('policy-without-routes'))
+    recordSubagentModelSelection(ctx.sessionProjections, session, { allowedModels: ALLOWED_MODELS })
+    const event = session.snapshotEvents().find(candidate => candidate.type === 'subagent/model-selection-policy')
+    expect(event?.type === 'subagent/model-selection-policy' ? event.data : undefined)
+      .toEqual({ allowedModels: ALLOWED_MODELS })
+    expect(event?.type === 'subagent/model-selection-policy' && 'defaultRoute' in event.data).toBe(false)
+    expect(event?.type === 'subagent/model-selection-policy' && 'arbiterRoute' in event.data).toBe(false)
+    expect(subagentModelSelectionPolicy(ctx.sessionProjections, session)).toEqual({ allowedModels: ALLOWED_MODELS })
+    await ctx.fiber.dispose()
+  })
+
+  it('rejects a durable default route outside the policy or with malformed ids', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionProjectionRegistry)
+    ctx.sessionProjections.register(subagentModelSelectionProjectionDefinition)
+    const outside = Session.create(SessionId('policy-default-outside'))
+    outside.append('subagent/model-selection-policy', {
+      allowedModels: ALLOWED_MODELS,
+      defaultRoute: { provider: 'alpha', model: 'other-model' },
+    })
+    expect(() => subagentModelSelectionPolicy(ctx.sessionProjections, outside))
+      .toThrow('default route "alpha/other-model" is not an allowed model')
+
+    const malformed = Session.create(SessionId('policy-default-malformed'))
+    malformed.append('subagent/model-selection-policy', {
+      allowedModels: ALLOWED_MODELS,
+      defaultRoute: { provider: 1, model: 'fast-model' },
+    } as never)
+    expect(() => subagentModelSelectionPolicy(ctx.sessionProjections, malformed))
+      .toThrow('requires non-empty provider and model ids')
     await ctx.fiber.dispose()
   })
 

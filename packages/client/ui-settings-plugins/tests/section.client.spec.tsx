@@ -91,6 +91,8 @@ function renderSubagentModelSelection(state: Partial<SubagentModelSelectionCardS
     ...settled,
     enabled: false,
     candidates: [],
+    defaultRoute: undefined,
+    arbiterRoute: undefined,
     catalogStatus: 'idle',
     catalogPartial: false,
     conflicted: false,
@@ -99,6 +101,8 @@ function renderSubagentModelSelection(state: Partial<SubagentModelSelectionCardS
   const actions = {
     toggleEnabled: vi.fn(),
     toggleModel: vi.fn(),
+    setDefaultRoute: vi.fn(),
+    setArbiterRoute: vi.fn(),
     retryCatalog: vi.fn(),
     save: vi.fn(),
     discard: vi.fn(),
@@ -396,6 +400,106 @@ describe('SubagentModelSelectionCard', () => {
     fireEvent.click(screen.getByRole('checkbox', { name: /Deep/ }))
     expect(actions.toggleModel).toHaveBeenCalledWith('alpha\0fast')
     expect(actions.toggleModel).toHaveBeenCalledWith('alpha\0deep')
+  })
+
+  it('offers the no-selection default route choice among authorized models', () => {
+    const actions = renderSubagentModelSelection({
+      enabled: true,
+      catalogStatus: 'ready',
+      defaultRoute: { provider: 'alpha', model: 'fast' },
+      candidates: [
+        {
+          key: 'alpha\0fast',
+          provider: 'alpha',
+          model: 'fast',
+          providerName: 'Alpha API',
+          modelName: 'Fast',
+          available: true,
+          selected: true,
+        },
+        {
+          key: 'alpha\0deep',
+          provider: 'alpha',
+          model: 'deep',
+          providerName: 'Alpha API',
+          modelName: 'Deep',
+          available: true,
+          selected: true,
+        },
+        {
+          key: 'alpha\0other',
+          provider: 'alpha',
+          model: 'other',
+          providerName: 'Alpha API',
+          modelName: 'Other',
+          available: true,
+          selected: false,
+        },
+      ],
+    })
+    fireEvent.click(screen.getByText(en.subagentModelSelectionTitle))
+
+    const select = screen.getByLabelText(en.subagentModelSelectionDefaultRoute) as HTMLSelectElement
+    expect(select.value).toBe('alpha\0fast')
+    const options = [...select.options].map(option => option.value)
+    expect(options).toEqual(['', 'alpha\0fast', 'alpha\0deep'])
+
+    fireEvent.change(select, { target: { value: 'alpha\0deep' } })
+    expect(actions.setDefaultRoute).toHaveBeenCalledWith('alpha\0deep')
+
+    fireEvent.change(select, { target: { value: '' } })
+    expect(actions.setDefaultRoute).toHaveBeenCalledWith(undefined)
+  })
+
+  it('offers the arbiter route choice separately from the default', () => {
+    const actions = renderSubagentModelSelection({
+      enabled: true,
+      catalogStatus: 'ready',
+      defaultRoute: { provider: 'alpha', model: 'fast' },
+      arbiterRoute: { provider: 'alpha', model: 'deep' },
+      candidates: [
+        {
+          key: 'alpha\0fast',
+          provider: 'alpha',
+          model: 'fast',
+          providerName: 'Alpha API',
+          modelName: 'Fast',
+          available: true,
+          selected: true,
+        },
+        {
+          key: 'alpha\0deep',
+          provider: 'alpha',
+          model: 'deep',
+          providerName: 'Alpha API',
+          modelName: 'Deep',
+          available: true,
+          selected: true,
+        },
+      ],
+    })
+    fireEvent.click(screen.getByText(en.subagentModelSelectionTitle))
+
+    const arbiter = screen.getByLabelText(en.subagentModelSelectionArbiterRoute) as HTMLSelectElement
+    expect(arbiter.value).toBe('alpha\0deep')
+    const options = [...arbiter.options].map(option => option.value)
+    expect(options).toEqual(['', 'alpha\0fast', 'alpha\0deep'])
+
+    // Choosing a concrete model forwards that key; the default select is untouched.
+    fireEvent.change(arbiter, { target: { value: 'alpha\0fast' } })
+    expect(actions.setArbiterRoute).toHaveBeenCalledWith('alpha\0fast')
+    expect(actions.setDefaultRoute).not.toHaveBeenCalled()
+
+    // Clearing the arbiter choice means "use the default model above".
+    fireEvent.change(arbiter, { target: { value: '' } })
+    expect(actions.setArbiterRoute).toHaveBeenCalledWith(undefined)
+  })
+
+  it('hides the default route choice while selection is off', () => {
+    renderSubagentModelSelection({ enabled: false })
+    fireEvent.click(screen.getByText(en.subagentModelSelectionTitle))
+
+    expect(screen.queryByLabelText(en.subagentModelSelectionDefaultRoute)).toBeNull()
   })
 
   it('renders directory progress, failures, unavailable routes, and validation', () => {

@@ -763,6 +763,16 @@ Source: [`packages/subagent/subagent/src/descriptor.ts:38`](../packages/subagent
 'subagent/model-selection-policy': {
   /** Exact routes this Session may select explicitly for a child. */
   allowedModels: AllowedModelRoute[]
+  /**
+   * Route used when a delegation call selects no model. Absent in logs
+   * written before defaults existed, and in sessions without one.
+   */
+  defaultRoute?: AllowedModelRoute
+  /**
+   * Route used by `role: arbiter` rows that select no model. Absent in logs
+   * written before role routes existed; such rows then use `defaultRoute`.
+   */
+  arbiterRoute?: AllowedModelRoute
 }
 ```
 

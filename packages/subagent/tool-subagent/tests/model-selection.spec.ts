@@ -107,6 +107,157 @@ describe('dsh-tool-subagent model selection', () => {
     expect(result.isError).toBe(false)
     expect(starts).toBe(1)
   })
+
+  it('delegates a call that selects nothing to the settings default route', async () => {
+    const requests: SubagentStartRequest[] = []
+    const ctx = await setup({
+      provider: 'mock',
+      withModelSelection: true,
+      defaultRoute: { provider: 'alpha', model: 'child-model' },
+    }, { onStart: (request) => { requests.push(request) } })
+    ctx.llm.registerAdapter(['alpha'], new MockAdapter([], REASONING))
+
+    const result = await callSubagent(ctx, { description: 'default work', prompt: 'do it' })
+
+    expect(result.isError).toBe(false)
+    expect(requests[0]?.agentOptions).toEqual({ provider: 'alpha', model: 'child-model' })
+  })
+
+  it('keeps pure inheritance when the setting sets no default route', async () => {
+    const requests: SubagentStartRequest[] = []
+    const ctx = await setup(
+      { provider: 'mock', withModelSelection: true },
+      { onStart: (request) => { requests.push(request) } },
+    )
+    ctx.llm.registerAdapter(['alpha'], new MockAdapter([], REASONING))
+
+    const result = await callSubagent(ctx, { description: 'inherit work', prompt: 'do it' })
+
+    expect(result.isError).toBe(false)
+    expect(requests[0]?.agentOptions).toBeUndefined()
+  })
+
+  it('sends an explicitly selected route instead of the settings default', async () => {
+    const requests: SubagentStartRequest[] = []
+    const ctx = await setup({
+      provider: 'mock',
+      withModelSelection: true,
+      defaultRoute: { provider: 'alpha', model: 'child-model' },
+    }, { onStart: (request) => { requests.push(request) } })
+    ctx.llm.registerAdapter(['alpha'], new MockAdapter([], REASONING))
+
+    const result = await callSubagent(ctx, {
+      description: 'route work',
+      prompt: 'do it',
+      provider: 'alpha',
+      model: 'configured-model',
+    })
+
+    expect(result.isError).toBe(false)
+    expect(requests[0]?.agentOptions).toEqual({ provider: 'alpha', model: 'configured-model' })
+  })
+
+  it('prefers pinned preset agent options over the settings default route', async () => {
+    const requests: SubagentStartRequest[] = []
+    const ctx = await setup({
+      provider: 'mock',
+      withModelSelection: true,
+      defaultRoute: { provider: 'alpha', model: 'child-model' },
+      agentOptions: { provider: 'alpha', model: 'configured-model', maxTokens: 321 },
+    }, { onStart: (request) => { requests.push(request) } })
+    ctx.llm.registerAdapter(['alpha'], new MockAdapter([], REASONING))
+
+    const result = await callSubagent(ctx, { description: 'pinned work', prompt: 'do it' })
+
+    expect(result.isError).toBe(false)
+    expect(requests[0]?.agentOptions).toEqual({
+      provider: 'alpha',
+      model: 'configured-model',
+      maxTokens: 321,
+    })
+  })
+
+  it('fills unpinned agent options with the settings default route', async () => {
+    const requests: SubagentStartRequest[] = []
+    const ctx = await setup({
+      provider: 'mock',
+      withModelSelection: true,
+      defaultRoute: { provider: 'alpha', model: 'child-model' },
+      agentOptions: { maxTokens: 321 },
+    }, { onStart: (request) => { requests.push(request) } })
+    ctx.llm.registerAdapter(['alpha'], new MockAdapter([], REASONING))
+
+    const result = await callSubagent(ctx, { description: 'merged work', prompt: 'do it' })
+
+    expect(result.isError).toBe(false)
+    expect(requests[0]?.agentOptions).toEqual({
+      provider: 'alpha',
+      model: 'child-model',
+      maxTokens: 321,
+    })
+  })
+
+  it('routes an arbiter row to the arbiter route and a worker row to the default', async () => {
+    const requests: SubagentStartRequest[] = []
+    const ctx = await setup({
+      provider: 'mock',
+      toolName: 'subagent',
+      withModelSelection: true,
+      withArbiterRow: true,
+      defaultRoute: { provider: 'alpha', model: 'child-model' },
+      arbiterRoute: { provider: 'alpha', model: 'selected-model' },
+    }, { onStart: (request) => { requests.push(request) } })
+    ctx.llm.registerAdapter(['alpha'], new MockAdapter([], REASONING))
+
+    const worker = await callSubagent(ctx, { description: 'gather', prompt: 'do it' })
+    const arbiter = await callSubagent(ctx, { description: 'judge', prompt: 'judge it' }, {
+      toolName: 'subagent_arbiter',
+    })
+
+    expect([worker.isError, arbiter.isError]).toEqual([false, false])
+    expect(requests[0]?.agentOptions).toEqual({ provider: 'alpha', model: 'child-model' })
+    expect(requests[1]?.agentOptions).toEqual({ provider: 'alpha', model: 'selected-model' })
+  })
+
+  it('falls back to the default route when the arbiter route is unset', async () => {
+    const requests: SubagentStartRequest[] = []
+    const ctx = await setup({
+      provider: 'mock',
+      withModelSelection: true,
+      withArbiterRow: true,
+      defaultRoute: { provider: 'alpha', model: 'child-model' },
+    }, { onStart: (request) => { requests.push(request) } })
+    ctx.llm.registerAdapter(['alpha'], new MockAdapter([], REASONING))
+
+    const result = await callSubagent(ctx, { description: 'judge', prompt: 'judge it' }, {
+      toolName: 'subagent_arbiter',
+    })
+
+    expect(result.isError).toBe(false)
+    expect(requests[0]?.agentOptions).toEqual({ provider: 'alpha', model: 'child-model' })
+  })
+
+  it('sends an explicitly selected route instead of the arbiter route', async () => {
+    const requests: SubagentStartRequest[] = []
+    const ctx = await setup({
+      provider: 'mock',
+      withModelSelection: true,
+      withArbiterRow: true,
+      arbiterRoute: { provider: 'alpha', model: 'selected-model' },
+    }, { onStart: (request) => { requests.push(request) } })
+    ctx.llm.registerAdapter(['alpha'], new MockAdapter([], REASONING))
+
+    const result = await callSubagent(ctx, {
+      description: 'explicit judge',
+      prompt: 'judge it',
+      provider: 'alpha',
+      model: 'configured-model',
+    }, { toolName: 'subagent_arbiter' })
+
+    expect(result.isError).toBe(false)
+    expect(requests[0]?.agentOptions).toEqual({ provider: 'alpha', model: 'configured-model' })
+  })
+
   it('exposes Session-authorized route fields and discovery when selection is enabled', async () => {
     const ctx = await setup({ provider: 'mock', withModelSelection: true })
     const agent = modelSelectionSetupAgent(ctx)

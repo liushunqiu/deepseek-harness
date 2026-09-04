@@ -1,14 +1,47 @@
 /** Model-facing discovery of LLM routes available to child Agents. */
 
 import type { Context } from '@deepseek-ai/cordis'
+import { scopeOf } from '@deepseek-ai/dsh-scope'
+import type { ScopeKey } from '@deepseek-ai/dsh-scope'
 import type LlmRuntime from '@deepseek-ai/dsh-llm'
 import type { LlmProviderInfo } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { modelRouteKey } from './model-selection.ts'
 import type { ModelSelectionPolicy } from './model-selection.ts'
 
 interface ListSubagentModelsRequest {
   readonly provider?: string
   readonly model?: string
+}
+
+/** Shared model-facing name for child route discovery. */
+export const LIST_SUBAGENT_MODELS_TOOL = 'list_subagent_models'
+
+interface DiscoveryLease {
+  readonly ctx: Context
+}
+
+interface DiscoveryCoordinator {
+  readonly policy: ModelSelectionPolicy
+  readonly leases: Set<DiscoveryLease>
+  readonly disposeRegistration: () => void
+}
+
+const discoveryCoordinators = new WeakMap<ScopeKey, DiscoveryCoordinator>()
+
+/** Release one lease and remove the shared registration after the final owner. */
+function releaseDiscovery(scope: ScopeKey, coordinator: DiscoveryCoordinator, lease: DiscoveryLease): void {
+  coordinator.leases.delete(lease)
+  if (coordinator.leases.size > 0) return
+  coordinator.disposeRegistration()
+  discoveryCoordinators.delete(scope)
+}
+
+/** Whether two captured discovery policies authorize the same route set. */
+function sameModelSelectionPolicy(left: ModelSelectionPolicy, right: ModelSelectionPolicy): boolean {
+  if (left.routes.length !== right.routes.length) return false
+  const rightKeys = new Set(right.routes.map(modelRouteKey))
+  return left.routes.every(route => rightKeys.has(modelRouteKey(route)))
 }
 
 /** Resolve one registered provider with a model-correctable diagnostic. */
@@ -79,13 +112,14 @@ async function listSubagentModels(
 }
 
 /**
- * Register `list_subagent_models` for one owning delegation-tool instance.
+ * Register `list_subagent_models` for one owning delegation-tool effect.
  * @param ctx - Context whose tool registry owns the fixed discovery definition.
  * @param policy - Route policy captured for this Session.
+ * @returns The exact tool-registry disposer.
  */
-export function registerListSubagentModels(ctx: Context, policy: ModelSelectionPolicy): void {
-  ctx.tools.register(defineTool({
-    name: 'list_subagent_models',
+export function registerListSubagentModels(ctx: Context, policy: ModelSelectionPolicy): () => void {
+  return ctx.tools.register(defineTool({
+    name: LIST_SUBAGENT_MODELS_TOOL,
     description:
       'Discover LLM routes for subagents without changing the current Agent. Call with no arguments to list '
       + 'registered providers, with `provider` to list its advertised models, or with `provider` and `model` '
@@ -110,4 +144,34 @@ export function registerListSubagentModels(ctx: Context, policy: ModelSelectionP
       return listSubagentModels(ctx, policy, args, exec.signal)
     },
   }))
+}
+
+/**
+ * Acquire the one discovery registration shared by selectable rows in a scope.
+ * Matching policies share it; conflicting policies reject during effect setup.
+ * @param ctx - Scoped delegation-row context that owns this lease.
+ * @param policy - Route policy captured for the row's Session.
+ */
+export function acquireListSubagentModels(ctx: Context, policy: ModelSelectionPolicy): void {
+  const scope = scopeOf(ctx)
+  if (scope === undefined) throw new Error('tool-subagent: model discovery requires a scoped context')
+  ctx.effect(() => {
+    const existing = discoveryCoordinators.get(scope)
+    const lease: DiscoveryLease = { ctx }
+    if (existing !== undefined) {
+      if (!sameModelSelectionPolicy(existing.policy, policy)) {
+        throw new Error('tool-subagent: selectable rows in one scope must use the same model-selection policy')
+      }
+      existing.leases.add(lease)
+      return () => { releaseDiscovery(scope, existing, lease) }
+    }
+
+    const coordinator: DiscoveryCoordinator = {
+      policy,
+      leases: new Set([lease]),
+      disposeRegistration: registerListSubagentModels(ctx.fiber.parent, policy),
+    }
+    discoveryCoordinators.set(scope, coordinator)
+    return () => { releaseDiscovery(scope, coordinator, lease) }
+  }, 'tool-subagent shared model discovery')
 }

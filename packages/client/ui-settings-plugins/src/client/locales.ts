@@ -17,6 +17,8 @@ export type PluginsSettingsLocaleKey =
   | 'subagentModelSelectionPartial' | 'subagentModelSelectionUnavailable'
   | 'subagentModelSelectionUnavailableGroup' | 'subagentModelSelectionEmpty'
   | 'subagentModelSelectionRequired' | 'subagentModelSelectionConflict' | 'subagentModelSelectionOff'
+  | 'subagentModelSelectionDefaultRoute' | 'subagentModelSelectionDefaultRouteNone'
+  | 'subagentModelSelectionArbiterRoute' | 'subagentModelSelectionArbiterRouteNone'
 
 /** English copy. */
 export const en: Record<PluginsSettingsLocaleKey, string> = {
@@ -60,7 +62,7 @@ export const en: Record<PluginsSettingsLocaleKey, string> = {
   subagentModelSelectionTitle: 'Subagent',
   subagentModelSelectionDescription: 'Control which models agents may choose for subagents.',
   subagentModelSelectionToggle: 'Allow agents to choose models for subagents',
-  subagentModelSelectionChoose: 'When enabled, agents can choose a provider, model, and reasoning effort for each subagent from the authorized models below. Applies only to new sessions.',
+  subagentModelSelectionChoose: 'When enabled, agents can choose a provider, model, and reasoning effort for each subagent only from the authorized models below. A delegation that names no model uses the default model below; an arbiter role prefers the arbiter model and falls back to the default model when none is set; a session with neither inherits the parent session\'s model. Applies only to new sessions.',
   subagentModelSelectionAllowed: 'Models agents may choose',
   subagentModelSelectionLoading: 'Loading models…',
   subagentModelSelectionLoadFailed: 'Models could not be loaded.',
@@ -71,7 +73,11 @@ export const en: Record<PluginsSettingsLocaleKey, string> = {
   subagentModelSelectionEmpty: 'No model provider currently advertises a model.',
   subagentModelSelectionRequired: 'Select at least one model before saving.',
   subagentModelSelectionConflict: 'Settings changed elsewhere. Discard your draft and try again.',
-  subagentModelSelectionOff: 'Subagents use configured defaults or inherit the parent agent\'s model. Saved model choices are retained.',
+  subagentModelSelectionOff: 'Subagents inherit the parent session\'s model, and agents are not offered a choice. Saved model choices are retained.',
+  subagentModelSelectionDefaultRoute: 'Default model for delegations that pick none',
+  subagentModelSelectionDefaultRouteNone: 'No default (inherit the parent session)',
+  subagentModelSelectionArbiterRoute: 'Model for arbiter roles that pick none',
+  subagentModelSelectionArbiterRouteNone: 'Use the default model above',
 }
 
 /** Simplified Chinese copy. */
@@ -116,7 +122,7 @@ export const zh: Record<PluginsSettingsLocaleKey, string> = {
   subagentModelSelectionTitle: 'Subagent',
   subagentModelSelectionDescription: '控制 Agent 为 Subagent 选择模型的权限。',
   subagentModelSelectionToggle: '允许 Agent 为 Subagent 选择模型',
-  subagentModelSelectionChoose: '开启后，Agent 可以从下方授权模型中，为每个 Subagent 选择提供方、模型和推理强度。仅影响新会话。',
+  subagentModelSelectionChoose: '开启后，Agent 只能从下方授权模型中，为每个 Subagent 选择提供方、模型和推理强度。委托时未指定模型的 Subagent 使用下方默认模型；仲裁角色未指定时优先使用仲裁模型，未设置仲裁模型时回退到默认模型；两者都未设置时继承父会话的模型。仅影响新会话。',
   subagentModelSelectionAllowed: 'Agent 可选择的模型',
   subagentModelSelectionLoading: '正在加载模型…',
   subagentModelSelectionLoadFailed: '无法加载模型。',
@@ -127,5 +133,9 @@ export const zh: Record<PluginsSettingsLocaleKey, string> = {
   subagentModelSelectionEmpty: '当前没有模型提供方公布模型。',
   subagentModelSelectionRequired: '保存前请至少选择一个模型。',
   subagentModelSelectionConflict: '设置已在其他位置更新。请放弃修改后重试。',
-  subagentModelSelectionOff: '关闭后，Subagent 使用配置的默认模型或继承父 Agent 的模型；已选模型会保留。',
+  subagentModelSelectionOff: '关闭后，Subagent 继承父会话的模型，Agent 无法为其选择模型；已选模型会保留。',
+  subagentModelSelectionDefaultRoute: '未指定模型时的默认模型',
+  subagentModelSelectionDefaultRouteNone: '无默认（继承父会话）',
+  subagentModelSelectionArbiterRoute: '仲裁角色未指定模型时使用的模型',
+  subagentModelSelectionArbiterRouteNone: '沿用上方默认模型',
 }

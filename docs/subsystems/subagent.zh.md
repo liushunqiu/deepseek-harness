@@ -454,6 +454,12 @@ interface SubagentProvider {
 
 提供方的 `start()` 会以已发布的 run fulfill。服务铸造唯一的 `runId`，从提供方确切的 `localAgent` 快照 `local`，观察结果，emit `subagent/start`，并返回同一个 run；`start()` rejection 意味着未发布资源已清理，且不会 emit 生命周期事件对，而发布后的结果 rejection 会结束已经 emit 的事件对。每个可继续 Activation 都会为其驻留纪元 emit 相同的仅观察事件对，因此一次冷恢复就是一段拥有自己 `runId` 的新纪元。配对的 `subagent/end` 携带相同标识与最终输出或基础设施失败。两个事件都仅用于观察，且会隔离各自的 listener 异常。其中的 `provider` 字段标明了启动 run 或 Activation 时段的提供方，并不声明该 edge 发出时提供方仍处于注册状态。
 
+## 按角色区分子 agent 路由
+
+声明多个委派行的预设——负责取证的 Worker、只读的 Reviewer、做终裁的 Arbiter——可能希望它们跑在不同模型上。宿主 `subagent-model-selection` 设置拥有两个「未指定模型时」的路由：`defaultRoute` 与 `arbiterRoute`。每一行通过自身的 `role` 配置（`worker` 为默认，或 `arbiter`）声明读取哪一个，`arbiter` 行在设置未配置仲裁路由时回退到 `defaultRoute`。角色在预设里声明，而所有具体模型 id 都留在用户设置中，因此部署方可以在不改动预设的前提下逐角色调整模型。
+
+子 agent 有效路由的解析顺序，由强到弱：调用时显式指定的路由、该行的 `agentOptions`、该行的角色路由、父路由。每个采样该设置的委派行都会在 Agent 自身作用域注册同一个共享的 `list_subagent_models` 发现工具；后续行跳过注册，而不是触发注册表的重名校验失败。
+
 ## 进程内后端：深度与种子
 
 spawn 和 fork 后端通过 `parent.ctx` 创建一个普通的单次 agent，将取消信号传入核心创建流程，并通过 `AgentHandle` 进行 dispose；而可继续子 agent 则由继续执行管理器通过其自己的 activation-owner 作用域创建。移除提供方会阻止新的 start，但不会撤销已接受的 run。每个子 agent 获得一个新的扁平作用域，而非继承父级注册。深度与 fork 种子注入复用既有的 agent 和会话词汇：
@@ -478,7 +484,7 @@ Singleton settings owner read by delegation tools when an Agent is published.
 ```ts cordis-catalog
 /**
  * Read a detached selection preference for the next eligible Agent publication.
- * @returns the enabled state and exact allowed routes.
+ * @returns the enabled state, exact allowed routes, and the optional no-selection routes.
  */
 current(): SubagentModelSelectionSettings
 ```

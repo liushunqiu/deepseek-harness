@@ -45,6 +45,7 @@ Load the subagent service, an in-process or remote backend, and this tool; then 
 | `provider` | required | Provider name on `ctx.subagents` (e.g. `spawn`, `fork`, `acp`) |
 | `toolName` | `subagent` | Model-facing tool name; distinct for every loaded instance |
 | `modelSelectionSettings` | `false` | Sample the Host's exact-route authorization preference for each new top-level Session; valid only in Agent scope and requires provider `agentOptions` support |
+| `role` | `worker` | Which settings-owned no-selection route this row uses when it selects no model: `worker` takes the general default route, `arbiter` takes the arbiter route and falls back to the general one |
 | `enableRunInBackground` | `true` | Expose `run_in_background`; disabling also rejects forced background calls |
 | `backgroundMode` | `one-shot` | Background policy: `one-shot` defaults calls to foreground; `continuable` defaults them to background and requires the provider's `prepareContinuable` capability |
 | `agentOptions` | — | Configured child `provider`, `model`, adapter-owned `reasoningEffort`, and positive `maxTokens` defaults; requires provider `agentOptions` support and overlays any provider-owned route defaults |
@@ -66,6 +67,10 @@ Under `continuable` policy, an omitted or `true` `run_in_background` starts a du
 
 Set `modelSelectionSettings: true` to sample the Host's `subagent-model-selection` preference when each fresh top-level Session is composed. A restored Session without a recorded policy remains disabled, including an explicitly empty restore. When enabled, the non-empty exact provider/model route list is recorded in the Session, inherited by child Sessions, and unchanged by later settings edits. The tool then exposes optional `provider`, `model`, and `reasoning_effort` fields and registers the shared `list_subagent_models` tool. This mode requires a backend that advertises `agentOptions`; both in-process backends and DSH SDK support it, while ACP, Codex, and Claude Code reject it rather than ignore it.
 
+The sampled preference may also pin a default route. When the user setting carries one, an instance of this tool uses it as its configured child `provider`/`model` default, so a call that omits the route fields starts the child on that route; without a default, such a call inherits the parent Session's current route. Pinned preset `agentOptions` win field-by-field over the sampled default, and an explicit `provider`/`model` in the call wins over both. The default route is validated at the settings boundary to be one of the allowed routes.
+
+`role` names which settings-owned no-selection route this row uses when it selects no model: `worker` (the default) reads the general default route, while `arbiter` reads the arbiter route and falls back to the general one when the user sets no arbiter route. Declaring a role lets a preset give its judging row a stronger model than its evidence-gathering rows without pinning a model id in the preset.
+
 A call supplies `provider` and `model` together, or supplies only an effort when configured, parent, or provider-owned defaults provide the route. Static `provider.agentRouteDefaults`, when present, form the provider/model baseline; tool configuration and model fields overlay it before route-aware effort merging and exact-route preflight. Providers without these defaults use compatible values from the parent's latest logged request, then the parent's creation options before its first request, while retaining the configured `maxTokens`. Changing the route without an explicit effort clears the inherited route-owned effort, so the selected model resolves its default. The live LLM adapter validates the effective route before child creation. Catalog membership remains advisory, so a model can use an unlisted id when its adapter accepts it.
 
 -----
@@ -80,7 +85,7 @@ This section explains how the tool mirrors provider lifecycle and settles runs; 
 
 ### Design concept
 
-One instance is one provider plus one tool name. The plugin mirrors provider lifecycle: it registers the tool when the named provider appears and disposes it when the provider leaves, so sibling load order and HMR replacement cannot strand a dangling tool. A numeric `maxDepth` or configured LLM selection the provider cannot enforce fails the mount instead of the first delegation. At most one instance in a tool scope may own model selection because `list_subagent_models` has a global name.
+One instance is one provider plus one tool name. The plugin mirrors provider lifecycle: it registers the tool when the named provider appears and disposes it when the provider leaves, so sibling load order and HMR replacement cannot strand a dangling tool. A numeric `maxDepth` or configured LLM selection the provider cannot enforce fails the mount instead of the first delegation. Model-selectable instances in the same Agent scope sample one Session policy and share the first `list_subagent_models` registration.
 
 ### Foreground settlement
 
@@ -120,6 +125,7 @@ Read these pages when the package-level contract is not enough; they move from t
 - [Background subagent tasks](../../../.agents/notes/implemented/feature/2026-07-08-background-subagent-tasks.md) — the one-shot background route.
 - [Background-first continuable delegation](../../../.agents/notes/implemented/feature/2026-08-11-background-first-continuable-delegation.md) — why continuable work defaults to background.
 - [Model-selected subagent routes](../../../.agents/notes/implemented/feature/2026-08-18-model-selected-subagent-routes.md) — selection policy, inheritance, discovery, and the fork restriction.
+- [User-authorized subagent model routes](../../../.agents/notes/implemented/feature/2026-08-24-user-authorized-subagent-model-routes.md) — settings-owned defaults, per-role routes, and shared discovery registration.
 
 -----
 
@@ -144,7 +150,7 @@ Prefix-stable while provider instances and their configuration are unchanged. Ad
 
 #### What the model sees
 
-A settings-controlled instance whose Session carries a policy exposes the child LLM selection fields and `list_subagent_models`. Calls reject while the optional `ctx.llm` service is unavailable. Discovery returns only registered providers and advertised models in the exact route policy; an unauthorized provider is rejected before its adapter catalog is called, and an exact lookup must be allowed before it resolves the model's reasoning efforts and default. Execution independently enforces the same policy.
+A settings-controlled instance whose Session carries a policy exposes the child LLM selection fields and `list_subagent_models`. Calls reject while the optional `ctx.llm` service is unavailable. Discovery returns only registered providers and advertised models in the exact route policy; an unauthorized provider is rejected before its adapter catalog is called, and an exact lookup must be allowed before it resolves the model's reasoning efforts and default. Execution independently enforces the same policy. Several rows compose on one Agent and sample the one Session policy, so their discovery definitions are identical; only the first row registers `list_subagent_models` in a scope, and later rows reuse it.
 
 #### Token effect
 

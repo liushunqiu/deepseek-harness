@@ -450,6 +450,12 @@ interface SubagentProvider {
 
 Provider `start()` fulfills with a published run. The service mints a unique `runId`, snapshots `local` from the provider's exact `localAgent`, observes the result, emits `subagent/start`, and returns the same run; a `start()` rejection implies cleanup of unpublished resources and emits no lifecycle pair, while a post-publication result rejection closes the emitted pair. Each continuable Activation emits the same observe-only pair for its residency epoch, so a cold resume is a new epoch with its own `runId`. The paired `subagent/end` carries the same identity and the final output or infrastructure failure. Both events are observe-only and contain listener exceptions. Their `provider` field names the provider that started the run or Activation epoch; it does not claim that the provider remains registered when the edge is emitted.
 
+## Per-role child routes
+
+A preset that declares several delegation rows — an evidence-gathering Worker, a read-only Reviewer, a final Arbiter — may want them on different models. The Host `subagent-model-selection` setting owns two no-selection routes: `defaultRoute` and `arbiterRoute`. A row names which one it reads through its `role` config (`worker`, the default, or `arbiter`), and an `arbiter` row falls back to `defaultRoute` when the setting sets no arbiter route. The role is declared in the preset while every concrete model id stays in the user setting, so a deployment retunes models per role without editing the preset.
+
+Effective child route resolution, strongest first: the route a call names explicitly, then the row's `agentOptions`, then the row's role route, then the parent route. Every row that samples the setting registers one shared `list_subagent_models` discovery tool in the Agent's own scope; later rows skip the registration rather than failing the registry's duplicate-name check.
+
 ## In-process backends: depth and seed
 
 The spawn and fork backends create an ordinary one-shot agent through `parent.ctx`, pass cancellation into core creation, and dispose through `AgentHandle`; a continuable child is instead created by the continuation manager through its own activation-owner scope. Provider removal blocks new starts without revoking accepted runs. Each child gets a new flat scope rather than inheriting parent registrations. Depth and fork seeding reuse existing agent and session vocabulary:
@@ -474,7 +480,7 @@ Singleton settings owner read by delegation tools when an Agent is published.
 ```ts cordis-catalog
 /**
  * Read a detached selection preference for the next eligible Agent publication.
- * @returns the enabled state and exact allowed routes.
+ * @returns the enabled state, exact allowed routes, and the optional no-selection routes.
  */
 current(): SubagentModelSelectionSettings
 ```

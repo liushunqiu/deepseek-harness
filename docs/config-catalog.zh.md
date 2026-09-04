@@ -2913,6 +2913,14 @@ export interface Config {
    */
   modelSelectionSettings?: boolean
   /**
+   * Which settings-owned no-selection route this row uses when it selects no
+   * model: `worker` (default) takes the general default route, `arbiter` takes
+   * the arbiter route and falls back to the general one. Declaring a role lets
+   * a preset give its judging row a stronger model than its evidence-gathering
+   * rows without pinning a model id in the preset.
+   */
+  role?: 'worker' | 'arbiter'
+  /**
    * Expose `run_in_background` (default true). Disabled instances omit the
    * parameter and reject forced background calls.
    */

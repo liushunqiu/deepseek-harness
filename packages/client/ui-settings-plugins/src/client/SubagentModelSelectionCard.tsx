@@ -6,6 +6,7 @@ import type {
   SubagentModelCandidate,
   SubagentModelSelectionCardFace,
 } from './subagent-model-selection-card-controller.ts'
+import { subagentModelKey } from './subagent-model-selection-card-controller.ts'
 import type {} from './slot-contract.ts'
 import { PluginCard } from './PluginCard.tsx'
 import css from './SubagentModelSelectionCard.module.css'
@@ -61,6 +62,7 @@ export function SubagentModelSelectionCard(props: SubagentModelSelectionCardProp
         : null}
     </label>
   )
+  const defaultCandidates = state.candidates.filter(candidate => candidate.selected)
   return (
     <PluginCard
       t={t}
@@ -132,6 +134,40 @@ export function SubagentModelSelectionCard(props: SubagentModelSelectionCardProp
                 ? <p className={css.notice}>{t('subagentModelSelectionEmpty')}</p>
                 : null}
             {state.invalid ? <p className={css.invalid}>{t('subagentModelSelectionRequired')}</p> : null}
+            <label className={css.defaultRoute}>
+              <span>{t('subagentModelSelectionDefaultRoute')}</span>
+              <select
+                value={state.defaultRoute === undefined ? '' : subagentModelKey(state.defaultRoute)}
+                disabled={!state.writable || state.saving}
+                onChange={(event) => {
+                  props.setDefaultRoute(event.target.value === '' ? undefined : event.target.value)
+                }}
+              >
+                <option value="">{t('subagentModelSelectionDefaultRouteNone')}</option>
+                {defaultCandidates.map(candidate => (
+                  <option key={candidate.key} value={candidate.key}>
+                    {`${candidate.modelName} · ${candidate.provider}/${candidate.model}`}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className={css.defaultRoute}>
+              <span>{t('subagentModelSelectionArbiterRoute')}</span>
+              <select
+                value={state.arbiterRoute === undefined ? '' : subagentModelKey(state.arbiterRoute)}
+                disabled={!state.writable || state.saving}
+                onChange={(event) => {
+                  props.setArbiterRoute(event.target.value === '' ? undefined : event.target.value)
+                }}
+              >
+                <option value="">{t('subagentModelSelectionArbiterRouteNone')}</option>
+                {defaultCandidates.map(candidate => (
+                  <option key={candidate.key} value={candidate.key}>
+                    {`${candidate.modelName} · ${candidate.provider}/${candidate.model}`}
+                  </option>
+                ))}
+              </select>
+            </label>
           </div>
         )
         : null}

@@ -31,14 +31,15 @@ import {
   preflightChildLlmRoute,
   requestedAgentOptions,
 } from './model-selection.ts'
-import type { DelegationModelRequest, ModelSelectionPolicy } from './model-selection.ts'
-import { registerListSubagentModels } from './list-models.ts'
+import type { DelegationModelRequest } from './model-selection.ts'
+import { acquireListSubagentModels } from './list-models.ts'
 import type {} from './model-selection-settings.ts'
 import {
   recordSubagentModelSelection,
   subagentModelSelectionProjectionDefinition,
   subagentModelSelectionPolicy,
 } from './model-selection-state.ts'
+import type { SubagentModelSelectionPolicy } from './model-selection-state.ts'
 
 export const name = 'tool-subagent'
 export const inject = ['tools', 'subagents', 'systemPrompt', 'sessionProjections']
@@ -57,6 +58,14 @@ export interface Config {
    * top-level session and inherit that decision in its child sessions.
    */
   modelSelectionSettings?: boolean
+  /**
+   * Which settings-owned no-selection route this row uses when it selects no
+   * model: `worker` (default) takes the general default route, `arbiter` takes
+   * the arbiter route and falls back to the general one. Declaring a role lets
+   * a preset give its judging row a stronger model than its evidence-gathering
+   * rows without pinning a model id in the preset.
+   */
+  role?: 'worker' | 'arbiter'
   /**
    * Expose `run_in_background` (default true). Disabled instances omit the
    * parameter and reject forced background calls.
@@ -105,6 +114,7 @@ export const Config: z<Config> = z.object({
   provider: z.string().required(),
   toolName: z.string().default('subagent'),
   modelSelectionSettings: z.boolean().default(false),
+  role: z.union(['worker', 'arbiter'] as const).default('worker'),
   enableRunInBackground: z.boolean().default(true),
   backgroundMode: z.union(['one-shot', 'continuable'] as const).default('one-shot'),
   // Prevent Schemastery from materializing omitted agentOptions as `{}`.
@@ -350,9 +360,21 @@ export function apply(ctx: Context, config: Config): void {
   const initialProvider = ctx.subagents.getProvider(config.provider)
   if (initialProvider !== undefined) assertSubagentProviderConfiguration(initialProvider)
 
-  const install = (runtimeCtx: Context, modelSelectionPolicy: ModelSelectionPolicy | undefined): void => {
-    const modelSelectionEnabled = modelSelectionPolicy !== undefined
-    if (modelSelectionPolicy !== undefined) registerListSubagentModels(runtimeCtx, modelSelectionPolicy)
+  const install = (runtimeCtx: Context, selection: SubagentModelSelectionPolicy | undefined): void => {
+    const modelSelectionPolicy = selection === undefined ? undefined : { routes: selection.allowedModels }
+    const modelSelectionEnabled = selection !== undefined
+    if (modelSelectionPolicy !== undefined) acquireListSubagentModels(runtimeCtx, modelSelectionPolicy)
+    // A sampled settings route pins the child route the same way a preset
+    // `agentOptions` row does; the preset's own pins stay stronger. An arbiter
+    // row reads the settings' arbiter route and falls back to the general
+    // default, so a preset can give its judging row a stronger model than its
+    // evidence-gathering rows without pinning a model id here.
+    const roleRoute = config.role === 'arbiter'
+      ? selection?.arbiterRoute ?? selection?.defaultRoute
+      : selection?.defaultRoute
+    const configuredAgentOptions = roleRoute === undefined
+      ? config.agentOptions
+      : { ...roleRoute, ...config.agentOptions }
     // Load order and HMR replacement can change provider availability while
     // this fiber remains active.
     let mounted: { subagentProvider: SubagentProvider; disposeTool: () => void } | undefined
@@ -471,10 +493,10 @@ export function apply(ctx: Context, config: Config): void {
           const modelRequest = args as DelegationModelRequest
           const parentOptions = parentAgentOptionsForDelegation(parent)
           const requiresRoutePreflight = hasDelegationModelRequest(modelRequest)
-            || hasConfiguredLlmSelection(config.agentOptions)
+            || hasConfiguredLlmSelection(configuredAgentOptions)
           const configuredChildAgentOptions = requiresRoutePreflight && providerRouteDefaults !== undefined
-            ? { ...providerRouteDefaults, ...config.agentOptions }
-            : config.agentOptions
+            ? { ...providerRouteDefaults, ...configuredAgentOptions }
+            : configuredAgentOptions
           const requestedChildAgentOptions = requestedAgentOptions(
             parentOptions,
             configuredChildAgentOptions,
@@ -615,28 +637,32 @@ export function apply(ctx: Context, config: Config): void {
     throw new Error('tool-subagent: `modelSelectionSettings` requires an Agent or preset scope')
   }
 
-  const selectForAgent = (agent: NonNullable<Context['agent']>): ModelSelectionPolicy | undefined => {
+  const selectForAgent = (agent: NonNullable<Context['agent']>): SubagentModelSelectionPolicy | undefined => {
     const freshSession = agent.session.firstLiveSeq === 0
       && agent.session.eventAt(SessionSeq(0))?.type !== 'session/end-seed'
-    let allowedModels = subagentModelSelectionPolicy(ctx.sessionProjections, agent.session)
-    if (allowedModels === undefined) {
+    let policy = subagentModelSelectionPolicy(ctx.sessionProjections, agent.session)
+    if (policy === undefined) {
       const parentId = agent.session.header.origin === 'subagent'
         ? agent.session.header.parentSession
         : undefined
       if (parentId !== undefined) {
         const parent = ctx.get('agents')?.get(parentId)
-        allowedModels = parent === undefined
+        policy = parent === undefined
           ? undefined
           : subagentModelSelectionPolicy(ctx.sessionProjections, parent.session)
       } else if (freshSession) {
         const current = settings.current()
-        allowedModels = current.enabled ? current.allowedModels : undefined
+        policy = current.enabled
+          ? {
+            allowedModels: current.allowedModels,
+            ...current.defaultRoute === undefined ? {} : { defaultRoute: current.defaultRoute },
+            ...current.arbiterRoute === undefined ? {} : { arbiterRoute: current.arbiterRoute },
+          }
+          : undefined
       }
     }
-    if (allowedModels !== undefined) {
-      recordSubagentModelSelection(ctx.sessionProjections, agent.session, allowedModels)
-    }
-    return allowedModels === undefined ? undefined : { routes: allowedModels }
+    if (policy !== undefined) recordSubagentModelSelection(ctx.sessionProjections, agent.session, policy)
+    return policy
   }
 
   const agent = ctx.agent
@@ -658,9 +684,9 @@ export function apply(ctx: Context, config: Config): void {
     installing.add(candidate)
     let fiber: ReturnType<Context['inject']>
     try {
-      const policy = selectForAgent(candidate)
+      const selection = selectForAgent(candidate)
       fiber = candidate.ctx.inject(['tools', 'subagents', 'systemPrompt'], (runtimeCtx) => {
-        install(runtimeCtx, policy)
+        install(runtimeCtx, selection)
       })
     } finally {
       installing.delete(candidate)
