@@ -41,3 +41,7 @@ apps/web/dist/
 worktrees/
 .agents/worktrees/
 .typert-*/
+
+# 机器本地记忆(不进 git)
+AGENTS.local.md
+.memories/
