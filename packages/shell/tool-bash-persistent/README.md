@@ -73,7 +73,7 @@ This section explains the design decisions behind the tool and points at the cod
 - **One shell per owner, nothing shared.** The shell registry keys every session by the calling `Agent`, so concurrent agents never share state, and commands for the same agent are serialized through a per-owner queue.
 - **Marker-anchored extraction.** Each command is wrapped with unique start/end markers carrying the exit status; the tool polls the PTY scrollback and extracts the span between the real markers, so prompts and echoed input never leak into results.
 - **Reset, never repair.** Any uncertain state — an explicit `exit`, a timeout, a send failure, an abort — closes the shell and starts the next call fresh, because a half-known shell is worse than a clean one.
-- **Owner-scoped lifecycle.** Shells are created lazily on first use and killed on plugin disposal or owner teardown; the owner-scoped `ctx.terminals` service fences every operation to the owning agent.
+- **Owner-scoped lifecycle.** Shells are created lazily on first use and killed on plugin disposal or owner teardown; the persistent tool closes its owner session through `ctx.terminals`, while the terminal service fences every operation to the owning agent.
 
 ### Source map
 

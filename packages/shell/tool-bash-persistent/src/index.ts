@@ -231,8 +231,11 @@ function persistentShells(ctx: Context, config: ResolvedConfig): PersistentShell
   ctx.effect(() => async () => {
     lifecycle.abort(new Error('tool-bash-persistent disposed during shell creation'))
     await Promise.allSettled([...creating])
-    const closing = [...live].map(async ([owner, id]) => { await close(owner, id, 'tool-bash-persistent disposed') })
-    await Promise.all(closing)
+    const sessions = [...live]
+    await Promise.all(sessions.map(async ([owner, id]) => {
+      live.delete(owner)
+      await close(owner, id, 'tool-bash-persistent disposed')
+    }))
     live.clear()
   }, 'tool-bash-persistent shell cleanup')
 
@@ -257,10 +260,11 @@ function persistentShells(ctx: Context, config: ResolvedConfig): PersistentShell
         live.set(owner, spawned.sessionId)
         if (!ownerCleanupInstalled.has(owner)) {
           ownerCleanupInstalled.add(owner)
-          owner.ctx.effect(() => () => {
-            pending.delete(owner)
-            live.delete(owner)
-          }, 'tool-bash-persistent owner cache cleanup')
+          owner.ctx.effect(() => async () => {
+            // TerminalSessionService owns unpublished spawn cancellation. Waiting here would
+            // deadlock owner teardown because its owner cleanup runs after this effect.
+            await reset(owner, 'persistent bash owner disposed')
+          }, 'tool-bash-persistent owner cleanup')
         }
         // Echo suppression only: the prompt stays the backend's own, so the
         // backend's prompt-based readiness detection keeps working.

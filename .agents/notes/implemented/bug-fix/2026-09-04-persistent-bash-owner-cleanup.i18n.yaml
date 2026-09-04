@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-09-04-persistent-bash-owner-cleanup.md
+2026-09-04-persistent-bash-owner-cleanup.md: 8b88089b9afd3121e9677aee1f42a9811ac89b20
+2026-09-04-persistent-bash-owner-cleanup.zh.md: 3b22a8d1da724111b22b3a1113930a4ac81b4ddf

@@ -341,6 +341,16 @@ describe('tool-bash-persistent', () => {
     expect(ctx.tools.get('bash')).toBeUndefined()
   })
 
+  it('closes the owner shell when the owner agent is disposed', async () => {
+    const { ctx, owner, stub } = await setup({ backendType: 'stub' })
+    await call(ctx, owner, 'warm up')
+
+    await owner.ctx.fiber.dispose()
+
+    expect(stub.sessions[0]?.closed).toEqual(['persistent bash owner disposed'])
+    expect(ctx.terminals.list(owner)).toEqual([])
+  })
+
   it('handles inferred idle, stdin_read fallback, shell exit, clipping, and cleanup', async () => {
     const { ctx, owner, stub, fiber } = await setup({
       backendType: 'stub',
@@ -571,6 +581,44 @@ describe('tool-bash-persistent', () => {
     const running = call(ctx, owner, 'pwd')
     await spawnStarted.promise
     await fiber.dispose()
+    await spawnAborted.promise
+    expect((await running).isError).toBe(true)
+    expect(ctx.terminals.list(owner)).toEqual([])
+  })
+
+  it('lets owner disposal cancel a pending shell spawn without deadlocking', async () => {
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(TerminalSessionService)
+    const spawnStarted = Promise.withResolvers<undefined>()
+    const spawnAborted = Promise.withResolvers<undefined>()
+    ctx.terminals.registerBackend({
+      type: 'slow-owner',
+      spawn: spec => new Promise((_resolve, reject) => {
+        spawnStarted.resolve(undefined)
+        spec.signal?.addEventListener('abort', () => {
+          spawnAborted.resolve(undefined)
+          reject(new Error('slow owner PTY spawn aborted'))
+        }, { once: true })
+      }),
+    })
+    await ctx.plugin(ToolBashPersistent, { backendType: 'slow-owner' })
+    const owner = agent(ctx, '/workspace')
+    const running = call(ctx, owner, 'pwd')
+    await spawnStarted.promise
+
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => { reject(new Error('owner disposal deadlocked')) }, 1_000)
+    })
+    try {
+      await Promise.race([owner.ctx.fiber.dispose(), deadline])
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
+    }
     await spawnAborted.promise
     expect((await running).isError).toBe(true)
     expect(ctx.terminals.list(owner)).toEqual([])

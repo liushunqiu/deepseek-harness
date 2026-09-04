@@ -73,7 +73,7 @@ kind: "package-reference"
 - **每个 owner 一个 shell，互不共享。** shell 注册表按调用方 `Agent` 为每个会话建键，因此并发 agent 永不共享状态，同一 agent 的命令通过按 owner 的队列串行化。
 - **标记锚定提取。** 每条命令都用携带退出状态的唯一起止标记包装；工具轮询 PTY scrollback 并提取真实标记之间的区间，因此提示词与回显输入永不泄漏进结果。
 - **重置，而非修复。** 任何不确定状态——显式 `exit`、超时、发送失败、中止——都会关闭 shell 并让下一次调用从全新状态开始，因为半知情的 shell 不如干净的 shell。
-- **按 owner 的生命周期。** shell 在首次使用时惰性创建，在插件释放或 owner 拆除时终止；按所有者隔离的 `ctx.terminals` 服务把每个操作都围栏到拥有它的 agent。
+- **按 owner 的生命周期。** shell 在首次使用时惰性创建，在插件释放或 owner 拆除时终止；持久工具通过 `ctx.terminals` 关闭 owner 会话，按所有者隔离的服务把每个操作都围栏到拥有它的 agent。
 
 ### 源码地图
 
