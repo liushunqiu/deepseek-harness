@@ -109,9 +109,11 @@ class StubPtySession implements TerminalBackendSession {
   closed: string[] = []
   mode: StubMode
   sends = 0
+  submitted: string[] = []
   pendingText = ''
   historyTruncated = false
   throwOnSend = false
+  outputText: string | undefined
 
   constructor(mode: StubMode) {
     this.mode = mode
@@ -119,6 +121,7 @@ class StubPtySession implements TerminalBackendSession {
 
   startSend(request: TerminalSendRequest): TerminalSendOperation {
     this.sends += 1
+    this.submitted.push(request.text)
     if (request.text.startsWith('stty -echo')) {
       if (this.mode === 'init-exit') {
         this.statusValue = { kind: 'exited', exitCode: 1, signal: null }
@@ -203,9 +206,9 @@ class StubPtySession implements TerminalBackendSession {
       this.scrollback += output
       return this.operation(Promise.resolve(this.result(output, 'stdin_read')))
     }
-    const commandOutput = this.mode === 'large'
+    const commandOutput = this.outputText ?? (this.mode === 'large'
       ? 'x'.repeat(100)
-      : this.mode === 'nonzero' ? '' : 'hello from stub'
+      : this.mode === 'nonzero' ? '' : 'hello from stub')
     const exitCode = this.mode === 'nonzero' ? 7 : 0
     const output = `${start ?? ''}\n${commandOutput}\n${end ?? ''}${exitCode}\n${this.motd}`
     this.scrollback += output
@@ -341,6 +344,55 @@ describe('tool-bash-persistent', () => {
     expect(ctx.tools.get('bash')).toBeUndefined()
   })
 
+  it('keeps history-expansion characters out of the submitted shell line', async () => {
+    const { ctx, owner, stub } = await setup()
+    await call(ctx, owner, "printf '%s\\n' '!archived/**' '!js' '!!js' '!23' '\\041'\nprintf '%s\\n' \"it's literal!\"")
+    const submitted = stub.sessions[0]?.submitted.at(-1)
+    expect(submitted).toContain('eval -- ')
+    expect(submitted).not.toContain('!')
+    expect(submitted).not.toMatch(/[\r\n]/)
+  })
+
+  it.each([
+    { maxOutputChars: 12, headChars: undefined, head: 'STARTX', tail: 'FINISH' },
+    { maxOutputChars: 12, headChars: 5, head: 'START', tail: 'XFINISH' },
+    { maxOutputChars: 12, headChars: 0, head: '', tail: 'XXXXXXFINISH' },
+    { maxOutputChars: 12, headChars: 12, head: 'STARTXXXXXXX', tail: '' },
+    { maxOutputChars: 1, headChars: undefined, head: '', tail: 'H' },
+    { maxOutputChars: 1, headChars: 1, head: 'S', tail: '' },
+  ])('preserves output ends and failure status within a $maxOutputChars-character body budget ($headChars head)', async ({ maxOutputChars, headChars, head, tail }) => {
+    const { ctx, owner, stub } = await setup({
+      backendType: 'stub',
+      maxOutputChars,
+      ...headChars === undefined ? {} : { headChars },
+    })
+    await call(ctx, owner, 'warm up')
+    const session = stub.sessions[0]!
+    session.mode = 'nonzero'
+    session.outputText = `START${'X'.repeat(100)}FINISH`
+    const result = text(await call(ctx, owner, 'long failing command'))
+    const clipped = result.split('\n<response clipped><NOTE>Only part of this command output is shown.</NOTE>\n')
+    expect(clipped).toEqual([head, `${tail}\n[exit code: 7]`])
+    expect(head.length + tail.length).toBeLessThanOrEqual(maxOutputChars)
+  })
+
+  it('keeps exact-limit output and does not split Unicode surrogate pairs when clipping', async () => {
+    const { ctx, owner, stub } = await setup({ backendType: 'stub', maxOutputChars: 4, headChars: 2 })
+    await call(ctx, owner, 'warm up')
+    const session = stub.sessions[0]!
+    session.outputText = 'a😀z'
+    expect(text(await call(ctx, owner, 'exact output'))).toBe('a😀z')
+    session.outputText = 'a😀middle😀z'
+    expect(text(await call(ctx, owner, 'Unicode output')))
+      .toBe('a\n<response clipped><NOTE>Only part of this command output is shown.</NOTE>\nz')
+  })
+
+  it.each([-1, 1.5, Infinity, 11])('rejects an invalid output head budget: %s', (headChars) => {
+    expect(() => {
+      ToolBashPersistent.apply(new Context(), { maxOutputChars: 10, headChars })
+    }).toThrow('headChars must be a safe integer between 0 and maxOutputChars')
+  })
+
   it('closes the owner shell when the owner agent is disposed', async () => {
     const { ctx, owner, stub } = await setup({ backendType: 'stub' })
     await call(ctx, owner, 'warm up')
@@ -355,6 +407,7 @@ describe('tool-bash-persistent', () => {
     const { ctx, owner, stub, fiber } = await setup({
       backendType: 'stub',
       maxOutputChars: 10,
+      headChars: 10,
     })
     await call(ctx, owner, 'warm up')
     const session = stub.sessions[0]!

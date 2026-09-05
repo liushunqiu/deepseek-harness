@@ -20,7 +20,17 @@ Both plugins are included in the Python runtime closure. The persistent Bash clo
 
 The shipped [`minimal` agent preset](../../../../packages/preset/agent-presets/presets/minimal/agent.cordis.yml) composes both plugins for the Claude SWE-compatible RL contract. Its entry-local PTY realm carries the registry, local backend, and persistent Bash tool; the editor registers beside that realm against the host filesystem. The preset fixes the complete system prompt, follows the deployment tool-presentation mode, omits every other model-facing consumer, and leaves browser, Workspace, persistence, sandbox, and permission services on the shared Web host. The local PTY backend resolves the effective session sandbox mode when it creates the shell. While that owner has an open shell or a spawn in progress, a different permission mode is rejected before its session event commits; the editor continues through the Web filesystem sandbox. The [minimal-preset decision](../bug-fix/2026-08-10-minimal-preset-owns-rl-composition.md) owns this composition boundary.
 
+The one-shot Bash consumer accepts a distinct `toolName`, allowing a persistent shell and managed command jobs in one composition without adding process ownership to the PTY adapter. The configured name also identifies approval requests and prompt contributions. A managed job's `completed` status does not imply exit code zero, and a PTY wait settling does not establish command completion.
+
+Persistent output clipping keeps both the retained prefix and suffix within `maxOutputChars`, with `headChars` selecting the split and fixed diagnostics outside that body budget. UTF-16 surrogate pairs are not split. This keeps startup context and final error summaries without adding a second full-output log owner; PTY scrollback loss remains explicit and irreversible.
+
+Unit and real Loader tests pin clipping limits, Unicode, exit statuses, managed background output, and registration disposal. The keyless [coexistence snapshot](../../../../snapshots/session/bash-tool-coexistence/session.jsonl) pins both registered tools, independent shell environments, clipped head/tail output, and nonzero exit diagnostics.
+
 ## Alternatives considered
+
+**Head-only output clipping.** Rejected because build and test failures commonly appear at the end of otherwise long output. Configurable head allocation still permits prefix-only or suffix-only deployments.
+
+**Detach commands through the persistent shell.** Rejected as the managed-job interface because the prompt returning cannot establish the detached process's exit status. Managed background work stays with the shell executor and job runtime.
 
 **One combined compatibility plugin.** Rejected because neither tool requires the other and the combined name would tie reusable capabilities to one benchmark.
 

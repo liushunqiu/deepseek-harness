@@ -1,0 +1,13 @@
+- id: tool-bash
+  disabled: true
+- insert:
+    - id: terminal
+      name: '@deepseek-ai/dsh-terminal'
+    - id: terminal-bash
+      name: '@deepseek-ai/dsh-terminal-bash'
+      config:
+        timeoutMs: 10000
+    - id: tool-bash-persistent
+      name: '@deepseek-ai/dsh-tool-bash-persistent'
+      config:
+        timeoutMs: 10000

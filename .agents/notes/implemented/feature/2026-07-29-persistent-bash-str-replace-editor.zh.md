@@ -20,7 +20,17 @@ Status: implemented
 
 随附的 [`minimal` agent preset](../../../../packages/preset/agent-presets/presets/minimal/agent.cordis.yml) 会组合这两个插件，以满足与 Claude SWE 兼容的 RL 约定。其 entry 本地 PTY realm 持有注册表、本地后端和持久 Bash 工具；编辑器在该 realm 旁注册，并使用宿主文件系统。preset 会固定完整系统提示词、跟随部署的工具呈现模式，省略其他所有面向模型的消费方，并将浏览器、Workspace、持久化、沙箱与权限服务留在共享 Web 宿主上。本地 PTY 后端会在创建 shell 时解析会话的有效沙箱模式。只要该所有者仍有打开的 shell 或仍在进行中的 spawn，另一种权限模式就会在对应的会话事件提交前遭到拒绝；编辑器则继续经由 Web 文件系统沙箱运行。这一组合边界由 [minimal-preset 决策](../bug-fix/2026-08-10-minimal-preset-owns-rl-composition.zh.md)负责说明。
 
+一次性 Bash 消费方接受独立的 `toolName`，使同一个装配可同时提供持久 shell 与受管命令任务，无需让 PTY 适配器增加进程所有权。配置名也用于标识审批请求和提示词贡献。受管任务的 `completed` 状态不代表退出码为零，PTY 等待结束也不能证明命令完成。
+
+持久输出裁剪在 `maxOutputChars` 内保留已有的前缀与后缀，由 `headChars` 决定分配，固定诊断不占正文预算；不拆开 UTF-16 代理项对。这保留启动上下文与最终错误摘要，而不增加第二个完整输出日志所有者；PTY 已丢失的滚动输出仍明确标注且不可恢复。
+
+单元与真实 Loader 测试固定裁剪上限、Unicode、退出状态、受管后台输出和注册释放行为。无需密钥的[共存快照](../../../../snapshots/session/bash-tool-coexistence/session.jsonl)固定两个工具的注册、独立 shell 环境、截断后的头尾输出及非零退出诊断。
+
 ## 考虑过的替代方案
+
+**仅保留输出头部。** 构建和测试失败常出现在长输出的末尾，因此否决。可配置的头部预算仍支持仅保留前缀或后缀的部署。
+
+**通过持久 shell 脱离命令。** 提示符返回不能证明已脱离进程的退出状态，因此不将其作为受管任务接口。受管后台工作仍归 shell 执行器与任务运行时所有。
 
 **单一组合兼容插件。** 被拒绝，因为两个工具互不依赖，组合命名还会把可复用能力绑定到某个基准。
 

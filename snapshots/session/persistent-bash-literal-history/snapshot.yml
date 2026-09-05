@@ -1,0 +1,8 @@
+version: 1
+scenario: persistent-bash-literal-history
+profile: headless
+composition: persistent-bash-literal-history
+recording: authored
+header:
+  class: persistent-bash-literal-history
+  pin: true

@@ -45,14 +45,17 @@ kind: "package-reference"
 |---|---|---|
 | `backendType` | `shell` | 用于每个 agent shell 的已注册 PTY 后端 |
 | `timeoutMs` | `300,000` | 单条命令的墙钟上限；超时关闭 shell |
-| `maxOutputChars` | `16,000` | 保留的命令输出字符上限；固定诊断信息在其后追加 |
+| `maxOutputChars` | `16,000` | 保留的命令输出 UTF-16 单元预算；固定诊断信息另计 |
+| `headChars` | `maxOutputChars` 的一半，向下取整 | 截断时的前缀预算，其余用于后缀；必须是零到 `maxOutputChars` 之间的安全整数 |
 | `description` | `Run commands in a persistent bash shell. State, including the current directory and exported environment variables, persists across calls for this agent.` | 面向模型的环境约定；部署方可描述自己的环境 |
 
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-tool-bash-persistent)是每个受支持字段及其 JSDoc 的穷尽式真源。
 
 ### agent 可以依赖什么
 
-命令共享每个 agent 一个 shell，因此状态一直保留到 `exit`、超时或重置——每一种都会关闭 shell 并告诉 agent 下一次调用从工作区的新目录与环境开始。结果排除私有完成标记；非零的包装命令追加 `[exit code: N]`，而在报告该状态前就退出的 shell 改为追加 `[shell exited: code N]`、`[shell killed by signal: SIG]` 或 `[shell exited]`，然后重置。长输出保留最早的已保留前缀并附裁剪通知；若 terminal 已经丢弃该前缀，结果会明确说明，而不是把尾部当作完整输出呈现。
+命令共享每个 agent 一个 shell，因此状态一直保留到 `exit`、超时或重置——每一种都会关闭 shell 并告诉 agent 下一次调用从工作区的新目录与环境开始。结果排除私有完成标记；非零的包装命令追加 `[exit code: N]`，而在报告该状态前就退出的 shell 改为追加 `[shell exited: code N]`、`[shell killed by signal: SIG]` 或 `[shell exited]`，然后重置。长输出在裁剪通知两侧保留已有的前缀与后缀，不拆开 UTF-16 代理项对；若 terminal 已经丢弃原始前缀，结果会明确说明。
+
+提交的命令文本不会执行 Bash 的 `!` 历史替换，即使启用了 `histexpand`。引号内的值、heredoc 和字面反斜杠转义都保留原有内容。
 
 ### 可能出什么问题
 
@@ -100,6 +103,7 @@ kind: "package-reference"
 - [terminal-bash 后端](../../terminal/terminal-bash/README.zh.md)——默认的 `shell` 后端。
 - [tool-terminal](../../terminal/tool-terminal/README.zh.md)——面向交互工作的六个模型侧 terminal 工具。
 - [持久 PTY 会话 Agent Note](../../../.agents/notes/implemented/feature/2026-07-16-persistent-pty-sessions.zh.md)——按所有者会话的设计及其理由。
+- [字面历史字符 Agent Note](../../../.agents/notes/implemented/bug-fix/2026-09-05-persistent-bash-history-expansion.zh.md)——交互式 Bash 历史展开下的命令引用。
 - [生成的工具目录](../../../docs/tool-catalog.zh.md#deepseek-aidsh-tool-bash-persistent)——`bash` 参数 schema 的确切内容。
 - [生成的配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-tool-bash-persistent)——每个受支持配置字段及其源声明。
 
@@ -126,7 +130,7 @@ kind: "package-reference"
 
 #### 模型看到什么
 
-命令共享每个 Agent 一个 shell，因此 cwd、导出的变量、已激活的环境、函数与后台任务都会跨调用保留。结果排除私有完成标记。当 shell 在没有打印完成标记的情况下再次读取 stdin——`exec`、中断，或提供方证明其 stdin 等待的交互式前台子进程之后——调用返回捕获的部分输出，它可能以后端自己的提示词文本结尾。非零的包装命令追加 `[exit code: N]`；在报告该状态前就退出的 shell 改为追加 `[shell exited: code N]`、`[shell killed by signal: SIG]`，或后端两者都未提供时的 `[shell exited]`，然后重置并告诉模型下一次调用从全新状态开始。长输出保留最早的已保留前缀并附裁剪通知。若 PTY 已经丢弃该前缀，结果会明确说明，而不是把尾部当作完整输出呈现。超时返回有界部分输出、关闭不确定的 shell 并报告重置。
+命令共享每个 Agent 一个 shell，因此 cwd、导出的变量、已激活的环境、函数与后台任务都会跨调用保留。结果排除私有完成标记。当 shell 在没有打印完成标记的情况下再次读取 stdin——`exec`、中断，或提供方证明其 stdin 等待的交互式前台子进程之后——调用返回捕获的部分输出，它可能以后端自己的提示词文本结尾。非零的包装命令追加 `[exit code: N]`；在报告该状态前就退出的 shell 改为追加 `[shell exited: code N]`、`[shell killed by signal: SIG]`，或后端两者都未提供时的 `[shell exited]`，然后重置并告诉模型下一次调用从全新状态开始。裁剪输出保留前缀和后缀，中间插入 `<response clipped><NOTE>Only part of this command output is shown.</NOTE>`，退出诊断不占裁剪预算。若 PTY 已经丢弃原始前缀，结果会明确说明。超时返回有界部分输出、关闭不确定的 shell 并报告重置。
 
 #### Token 影响
 
@@ -146,6 +150,7 @@ kind: "package-reference"
 - **工具需要拥有者 Agent 与真实的 PTY 后端**——无 agent 的调用与无法启动交互 shell 的后端都会失败。
 - **交互式前台子进程只在子进程提供方证明其 stdin 等待时才提前返回部分输出**——否则调用一直运行到 `timeoutMs`。
 - **显式 `exit` 与超时会丢弃 shell 状态**——取消同样重置并丢弃结果，即使完整状态标记已经可观察；下一次调用启动全新 shell。
+- **裁剪不会保存完整输出日志**——只能使用 PTY 已保留的滚动输出。需要受管后台任务与明确的退出状态收集时，使用单独命名的[一次性 Bash 工具](../tool-bash/README.zh.md)；PTY 等待结束不代表命令成功。
 - **网络访问与包镜像等环境事实属于配置的 `description`**——而不是本包的默认描述。
 
 <a id="dev-note"></a>

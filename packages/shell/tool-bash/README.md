@@ -41,10 +41,11 @@ The common path is an executor provider, the environment registry, and this tool
 - name: '@deepseek-ai/dsh-tool-jobs'
 ```
 
-The single config field toggles background support.
+Configuration controls the registered name and background support. Set `toolName: bash_task` to mount this tool alongside the persistent `bash` tool without sharing shell state. The configured name also identifies its prompt section and approval requests; it must be non-empty with no surrounding whitespace.
 
 | Field | Default | Meaning |
 |---|---|---|
+| `toolName` | `bash` | Registered tool name; use a distinct name when another plugin owns `bash` |
 | `enableRunInBackground` | `true` | Expose `run_in_background`; when `false`, forced background calls are rejected |
 
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-tool-bash) is the exhaustive source for every accepted field and its JSDoc; the generated [tool catalog](../../../docs/tool-catalog.md#deepseek-aidsh-tool-bash) carries the full argument schema.
@@ -55,7 +56,7 @@ The tool executes `bash -c <command>` and returns the combined output. Commands 
 
 ### Running long commands in the background
 
-Passing `run_in_background: true` returns a job id immediately and no timeout applies; the command keeps running while the agent works on something else. The agent reads its output with `job_output` (non-blocking unless `wait: true`), lists jobs with `job_list`, and stops it with `job_kill`; a finished job notifies the owning agent in-session. Background support needs the generic job runtime (`dsh-jobs-local`) and its control tools (`dsh-tool-jobs`) mounted.
+Passing `run_in_background: true` returns a job id immediately and no timeout applies; the command keeps running while the agent works on something else. The agent reads its output with `job_output` (non-blocking unless `wait: true`), lists jobs with `job_list`, and stops it with `job_kill`; a finished job notifies the owning agent in-session. A `completed` job can have a non-zero exit code: check both the status and exit detail before claiming success. Background support needs the generic job runtime (`dsh-jobs-local`) and its control tools (`dsh-tool-jobs`) mounted.
 
 ### Sandboxed execution and escalation
 
@@ -126,7 +127,7 @@ Read these pages when the package-level contract is not enough. They move from t
 
 #### What the model sees
 
-Every request in this plugin's registration scope contains the bash guidance below at first-party order 1000. The policy owner contributes current sandbox state through its cache-safe runtime context rather than changing this section. Scoped tool restrictions can hide the schema without removing this independently registered section.
+Every request in this plugin's registration scope contains the guidance below at first-party order 1000, with `bash` replaced by `toolName` when configured. The policy owner contributes current sandbox state through its cache-safe runtime context rather than changing this section. Scoped tool restrictions can hide the schema without removing this independently registered section.
 
 ##### Bash guidance
 
@@ -146,7 +147,7 @@ Prefix-stable while the registration scope and prompt text are unchanged. Plugin
 
 #### What the model sees
 
-The model sees the generated [`bash` schema](../../../docs/tool-catalog.md#deepseek-aidsh-tool-bash). `run_in_background` appears only when this producer enables it; `sandbox_permissions` and `justification` appear only when the mounted executor advertises sandboxing. Agent-scoped tool restrictions can remove the definition for that agent.
+The model sees the generated [`bash` schema](../../../docs/tool-catalog.md#deepseek-aidsh-tool-bash), registered under `toolName`. `run_in_background` appears only when this producer enables it; `sandbox_permissions` and `justification` appear only when the mounted executor advertises sandboxing. Agent-scoped tool restrictions can remove the definition for that agent.
 
 #### Token effect
 

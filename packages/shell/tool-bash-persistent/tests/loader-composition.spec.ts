@@ -67,7 +67,7 @@ function text(result: { content: { type: string; text?: string }[] }): string {
 const suite = process.platform === 'linux' || process.platform === 'darwin' ? describe : describe.skip
 
 suite('persistent Bash through a real cordis.yml Loader composition', () => {
-  it('preserves cwd and environment across calls', async () => {
+  it('preserves cwd, environment, and literal exclamation marks with history expansion enabled', async () => {
     root = await mkdtemp(join(tmpdir(), 'dsh-persistent-bash-loader-'))
     const configPath = join(root, 'cordis.yml')
     await writeFile(configPath, [
@@ -155,15 +155,30 @@ suite('persistent Bash through a real cordis.yml Loader composition', () => {
     ))
     expect(heredoc).toBe('alpha\nbeta')
 
+    expect(text(await execute(
+      'enable-history',
+      "set -H; case $- in *H*) printf 'history enabled\\n';; esac",
+    ))).toBe('history enabled')
+    expect(text(await execute(
+      'literal-history',
+      "printf '%s\\n' '!archived/**' '!js' '!!js' '!23' '\\041' \"it's literal!\"",
+    ))).toBe("!archived/**\n!js\n!!js\n!23\n\\041\nit's literal!")
+    expect(text(await execute(
+      'literal-history-heredoc',
+      "cat <<'EOF'\n!js\n!!js\nprovider!.start\nit's literal!\nEOF",
+    ))).toBe("!js\n!!js\nprovider!.start\nit's literal!")
+    expect(text(await execute('state-after-history', 'printf "%s\\n" "$KEEP"'))).toBe('loader')
+
     const pipeline = text(await execute(
       'pipeline',
       '{ sleep 0.1; printf "delayed\\n"; } | cat',
     ))
     expect(pipeline).toBe('delayed')
 
-    const large = text(await execute('large-output', 'seq 1 12050'))
+    const large = text(await execute('large-output', 'seq 1 12050; (exit 7)'))
     expect(large.startsWith('1\n2\n3\n')).toBe(true)
     expect(large).toContain('<response clipped>')
+    expect(large.endsWith('12049\n12050\n[exit code: 7]')).toBe(true)
     expect(large).not.toContain('beginning of this command output was dropped')
 
     // `exec` replaces the wrapper before its end marker prints; the seam's

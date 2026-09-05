@@ -41,10 +41,11 @@ kind: "package-reference"
 - name: '@deepseek-ai/dsh-tool-jobs'
 ```
 
-唯一的配置字段用于开关后台支持。
+配置控制注册名称与后台支持。设置 `toolName: bash_task` 可将本工具与持久 `bash` 工具同时挂载，两者不共享 shell 状态。配置名也用于标识其提示词区段和审批请求；名称必须非空且无首尾空白。
 
 | 字段 | 默认值 | 含义 |
 |---|---|---|
+| `toolName` | `bash` | 注册工具名；其他插件已占用 `bash` 时使用不同名称 |
 | `enableRunInBackground` | `true` | 暴露 `run_in_background`；为 `false` 时拒绝强制后台调用 |
 
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-tool-bash)是每个受支持字段及其 JSDoc 的穷尽式真源；生成的[工具目录](../../../docs/tool-catalog.zh.md#deepseek-aidsh-tool-bash)携带完整参数 schema。
@@ -55,7 +56,7 @@ kind: "package-reference"
 
 ### 后台运行长时间命令
 
-传入 `run_in_background: true` 会立即返回 job id，不应用超时；命令继续运行，agent 同时处理其他事情。agent 用 `job_output` 读取输出（除非 `wait: true`，否则非阻塞）、用 `job_list` 列出任务、用 `job_kill` 停止任务；完成的任务会在会话内通知拥有它的 agent。后台支持需要挂载通用任务运行时（`dsh-jobs-local`）及其控制工具（`dsh-tool-jobs`）。
+传入 `run_in_background: true` 会立即返回 job id，不应用超时；命令继续运行，agent 同时处理其他事情。agent 用 `job_output` 读取输出（除非 `wait: true`，否则非阻塞）、用 `job_list` 列出任务、用 `job_kill` 停止任务；完成的任务会在会话内通知拥有它的 agent。`completed` 任务仍可能具有非零退出码：宣称成功前必须同时检查状态与退出详情。后台支持需要挂载通用任务运行时（`dsh-jobs-local`）及其控制工具（`dsh-tool-jobs`）。
 
 ### 沙箱执行与升权
 
@@ -126,7 +127,7 @@ kind: "package-reference"
 
 #### 模型看到什么
 
-该插件注册 scope 中的每次请求都在 first-party 顺序 1000 处包含以下 bash 指引。策略归属方通过其缓存安全的运行时上下文贡献当前沙箱状态，而不修改本区段。按 scope 限制工具可以隐藏 schema，却不会移除这个独立注册的区段。
+该插件注册 scope 中的每次请求都在 first-party 顺序 1000 处包含以下指引；配置 `toolName` 时，其中的 `bash` 替换为该名称。策略归属方通过其缓存安全的运行时上下文贡献当前沙箱状态，而不修改本区段。按 scope 限制工具可以隐藏 schema，却不会移除这个独立注册的区段。
 
 ##### Bash 指引
 
@@ -146,7 +147,7 @@ Check the [exit code: N] marker on every bash result; investigate failures befor
 
 #### 模型看到什么
 
-模型会看到生成的 [`bash` schema](../../../docs/tool-catalog.zh.md#deepseek-aidsh-tool-bash)。仅当本生产方启用 `run_in_background` 时，该字段才会出现；仅当已挂载执行器声明支持沙箱时，`sandbox_permissions` 和 `justification` 才会出现。按 agent（智能体）scope 限制工具可以移除该 agent 的定义。
+模型会看到生成的 [`bash` schema](../../../docs/tool-catalog.zh.md#deepseek-aidsh-tool-bash)，以 `toolName` 注册。仅当本生产方启用 `run_in_background` 时，该字段才会出现；仅当已挂载执行器声明支持沙箱时，`sandbox_permissions` 和 `justification` 才会出现。按 agent（智能体）scope 限制工具可以移除该 agent 的定义。
 
 #### Token 影响
 

@@ -1,0 +1,9 @@
+version: 1
+scenario: bash-tool-coexistence
+profile: headless
+composition: bash-tool-coexistence
+recording: authored
+header:
+  class: bash-tool-coexistence
+  pin: true
+platform: posix

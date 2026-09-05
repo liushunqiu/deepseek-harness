@@ -447,6 +447,38 @@ describe('bash tool', () => {
     expect(Object.keys(schema.parameters.properties as Record<string, unknown>))
       .toContain('run_in_background')
   })
+
+  it.each(['', ' ', ' bash_task'])('rejects an invalid configured tool name: %j', (toolName) => {
+    expect(() => {
+      ToolBash.apply(new Context(), { toolName })
+    }).toThrow('toolName must be non-empty with no surrounding whitespace')
+  })
+
+  it.each([0, 7])('keeps a separately named command tool and reports the process exit %s through jobs', async (exitCode) => {
+    const ctx = await setupWithTasks()
+    try {
+      const fiber = await ctx.plugin(ToolBash, { toolName: 'bash_task' })
+      expect(ctx.tools.schemas().map(tool => tool.name)).toContain('bash')
+      expect(ctx.tools.schemas().map(tool => tool.name)).toContain('bash_task')
+      expect((await ctx.systemPrompt.assemble()).sections.map(section => section.name)).toContain('tool:bash_task')
+      const started = await call(ctx, 'bash_task', {
+        command: `printf 'BACKGROUND_RESULT'; exit ${exitCode}`,
+        description: 'Run a separately named background command',
+        run_in_background: true,
+      })
+      expect(started.isError).toBe(false)
+      expect(text(started)).toBe('started background job bash-1')
+      const result = await call(ctx, 'job_output', { job_id: 'bash-1', wait: true, timeout_ms: 5000 })
+      expect(text(result)).toContain('BACKGROUND_RESULT')
+      expect(text(result)).toContain(`[status: completed, exit code: ${exitCode}]`)
+      await fiber.dispose()
+      expect(ctx.tools.get('bash_task')).toBeUndefined()
+      expect(ctx.tools.get('bash')).toBeDefined()
+      expect((await ctx.systemPrompt.assemble()).sections.map(section => section.name)).not.toContain('tool:bash_task')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
 })
 
 describe('background execution through the job runtime', () => {

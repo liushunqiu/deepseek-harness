@@ -2623,6 +2623,8 @@ export type TokenMeterConfig = Record<string, never>
 ```ts config-catalog
 /** Configuration for the bash tool. */
 export interface Config {
+  /** Registered tool name, allowing a separate persistent bash tool in the same preset (default bash). */
+  toolName?: string
   /** Expose `run_in_background` (default true); disabled calls are also rejected. */
   enableRunInBackground?: boolean
 }
@@ -2643,14 +2645,16 @@ export interface Config {
   backendType?: string
   /** Wall-clock limit for one command (default 300000). */
   timeoutMs?: number
-  /** Maximum returned command-output characters before clipping (default 16000). */
+  /** Retained command-output UTF-16 code units before clipping; fixed diagnostics are additional (default 16000). */
   maxOutputChars?: number
+  /** Leading UTF-16 code units retained when clipping; the suffix uses the remaining output budget (default half, rounded down). */
+  headChars?: number
   /** Model-facing tool description; deployments may describe their environment. */
   description?: string
 }
 ```
 
-来源：[`packages/shell/tool-bash-persistent/src/index.ts:436`](../packages/shell/tool-bash-persistent/src/index.ts)
+来源：[`packages/shell/tool-bash-persistent/src/index.ts:439`](../packages/shell/tool-bash-persistent/src/index.ts)
 
 <a id="deepseek-aidsh-tool-fs"></a>
 

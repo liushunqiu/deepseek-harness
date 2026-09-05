@@ -45,14 +45,17 @@ The default `shell` backend starts an interactive bash through `dsh-terminal-bas
 |---|---|---|
 | `backendType` | `shell` | Registered PTY backend used for each agent's shell |
 | `timeoutMs` | `300,000` | Wall-clock limit for one command; timeout closes the shell |
-| `maxOutputChars` | `16,000` | Maximum retained command-output characters; fixed diagnostics are added afterward |
+| `maxOutputChars` | `16,000` | Retained command-output UTF-16 code-unit budget; fixed diagnostics are additional |
+| `headChars` | Half of `maxOutputChars`, rounded down | Prefix budget when clipping; the suffix uses the remainder; a safe integer from zero through `maxOutputChars` |
 | `description` | `Run commands in a persistent bash shell. State, including the current directory and exported environment variables, persists across calls for this agent.` | Model-facing environment contract; deployments may describe their environment |
 
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-tool-bash-persistent) is the exhaustive source for every accepted field and its JSDoc.
 
 ### What the agent can rely on
 
-Commands share one shell per agent, so state persists until an `exit`, a timeout, or a reset — each of which closes the shell and tells the agent the next call starts from the workspace with a fresh directory and environment. Results exclude the private completion markers; a non-zero wrapped command appends `[exit code: N]`, and a shell that exits before reporting that status instead appends `[shell exited: code N]`, `[shell killed by signal: SIG]`, or `[shell exited]`, then resets. Long output keeps the earliest retained prefix plus a clipping notice; if the terminal has already dropped that prefix, the result says so explicitly rather than presenting a tail as complete output.
+Commands share one shell per agent, so state persists until an `exit`, a timeout, or a reset — each of which closes the shell and tells the agent the next call starts from the workspace with a fresh directory and environment. Results exclude the private completion markers; a non-zero wrapped command appends `[exit code: N]`, and a shell that exits before reporting that status instead appends `[shell exited: code N]`, `[shell killed by signal: SIG]`, or `[shell exited]`, then resets. Long output keeps its retained prefix and suffix around a clipping notice without splitting UTF-16 surrogate pairs; if the terminal has already dropped the original prefix, the result says so explicitly.
+
+Bash's `!` history substitutions are not applied to submitted command text, even when `histexpand` is enabled. Quoted values, heredocs, and literal backslash escapes retain their contents.
 
 ### What can go wrong
 
@@ -100,6 +103,7 @@ Read these pages when the package-level contract is not enough. They move from t
 - [terminal-bash backend](../../terminal/terminal-bash/README.md) — the default `shell` backend.
 - [tool-terminal](../../terminal/tool-terminal/README.md) — six model-facing terminal tools for interactive work.
 - [Persistent PTY sessions Agent Note](../../../.agents/notes/implemented/feature/2026-07-16-persistent-pty-sessions.md) — the owner-scoped session design and its rationale.
+- [Literal history characters Agent Note](../../../.agents/notes/implemented/bug-fix/2026-09-05-persistent-bash-history-expansion.md) — command quoting under interactive Bash history expansion.
 - [Generated tool catalog](../../../docs/tool-catalog.md#deepseek-aidsh-tool-bash-persistent) — the exact `bash` argument schema.
 - [Generated configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-tool-bash-persistent) — every accepted config field and its source declaration.
 
@@ -126,7 +130,7 @@ Prefix-stable while the configured description and schema remain unchanged.
 
 #### What the model sees
 
-Commands share one shell per Agent, so cwd, exported variables, activated environments, functions, and background jobs persist across calls. Results exclude private completion markers. When the shell reads stdin again without having printed the completion marker — after `exec`, an interrupt, or an interactive foreground child whose stdin wait the provider proves — the call returns the captured partial output, which can end with the backend's own prompt text. A nonzero wrapped command appends `[exit code: N]`; a shell that exits before reporting that status instead appends `[shell exited: code N]`, `[shell killed by signal: SIG]`, or `[shell exited]` when the backend supplies neither, then resets and tells the model that the next call starts fresh. Long output keeps the earliest retained prefix plus a clipping notice. If the PTY has already dropped that prefix, the result says so explicitly instead of presenting a tail as complete output. Timeout returns bounded partial output, closes the uncertain shell, and reports the reset.
+Commands share one shell per Agent, so cwd, exported variables, activated environments, functions, and background jobs persist across calls. Results exclude private completion markers. When the shell reads stdin again without having printed the completion marker — after `exec`, an interrupt, or an interactive foreground child whose stdin wait the provider proves — the call returns the captured partial output, which can end with the backend's own prompt text. A nonzero wrapped command appends `[exit code: N]`; a shell that exits before reporting that status instead appends `[shell exited: code N]`, `[shell killed by signal: SIG]`, or `[shell exited]` when the backend supplies neither, then resets and tells the model that the next call starts fresh. Clipped output retains its prefix and suffix separated by `<response clipped><NOTE>Only part of this command output is shown.</NOTE>`, with exit diagnostics outside the clipping budget. If the PTY has already dropped the original prefix, the result says so explicitly. Timeout returns bounded partial output, closes the uncertain shell, and reports the reset.
 
 #### Token effect
 
@@ -146,6 +150,7 @@ These limits define when the tool is a poor fit or needs special care. They are 
 - **The tool requires an owning Agent and a real PTY backend** — agent-less calls and backends that cannot start an interactive shell fail.
 - **An interactive foreground child returns early with partial output only where the subprocess provider proves its stdin wait** — elsewhere the call runs to `timeoutMs`.
 - **Explicit `exit` and timeout discard shell state** — cancellation also resets and discards the result, even when a complete status marker is already observable; the next call starts a fresh shell.
+- **Clipping does not save a full-output log** — only retained PTY scrollback is available. Use a separately named [one-shot Bash tool](../tool-bash/README.md) for managed background jobs and explicit exit-status collection; a PTY wait settling is not command success.
 - **Environment facts such as network access and package mirrors belong in the configured `description`** — not this package's default.
 
 <a id="dev-note"></a>

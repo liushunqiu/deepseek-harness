@@ -31,12 +31,15 @@ export const inject = ['tools', 'shell', 'systemPrompt', 'shellEnv']
 
 /** Configuration for the bash tool. */
 export interface Config {
+  /** Registered tool name, allowing a separate persistent bash tool in the same preset (default bash). */
+  toolName?: string
   /** Expose `run_in_background` (default true); disabled calls are also rejected. */
   enableRunInBackground?: boolean
 }
 
 /** Runtime configuration schema for the bash tool plugin. */
 export const Config: z<Config> = z.object({
+  toolName: z.string().default('bash'),
   enableRunInBackground: z.boolean().default(true),
 })
 
@@ -187,6 +190,10 @@ const BACKGROUND_OUTPUT_PROPERTIES = {
 } as const
 
 export function apply(ctx: Context, config: Config = {}): void {
+  const toolName = config.toolName ?? 'bash'
+  if (toolName.trim().length === 0 || toolName.trim() !== toolName) {
+    throw new Error('tool-bash: toolName must be non-empty with no surrounding whitespace')
+  }
   const backgroundEnabled = config.enableRunInBackground ?? true
   const defaultMode = ctx.shell.sandboxMode
   const escalationModes: readonly SandboxMode[] = defaultMode === undefined ? [] : ESCALATION_TARGETS
@@ -225,7 +232,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         approver: ctx.get('approval'),
         agent: exec.agent,
         callId: exec.callId,
-        toolName: 'bash',
+        toolName,
         signal: exec.signal,
       },
     )
@@ -233,13 +240,13 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   // Cross-call guidance belongs in the prompt rather than one-call schema prose.
   ctx.systemPrompt.section({
-    name: 'tool:bash',
+    name: `tool:${toolName}`,
     order: ctx.systemPrompt.getSectionOrder('TOOL_BASH'),
-    text: 'Check the [exit code: N] marker on every bash result; investigate failures before moving on.',
+    text: `Check the [exit code: N] marker on every ${toolName} result; investigate failures before moving on.`,
   })
 
   ctx.tools.register(defineTool({
-    name: 'bash',
+    name: toolName,
     description: bashDescription(backgroundEnabled, escalationModes),
     parameters: {
       command: { type: 'string', required: true, description: 'The bash command to execute.' },

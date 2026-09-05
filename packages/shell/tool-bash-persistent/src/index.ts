@@ -1,5 +1,6 @@
 /**
  * Model-facing persistent `bash` tool over the owner-scoped PTY seam.
+ * Command framing does not expose `!` to Bash history expansion, including on Bash 3.2.
  * @module @deepseek-ai/dsh-tool-bash-persistent
  */
 
@@ -11,8 +12,7 @@ import type { TerminalReadResult, TerminalSessionId } from '@deepseek-ai/dsh-ter
 import { deadline, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
-// TODO: Replace the file-search advice; arbitrary command output need not come from a searchable file.
-const TRUNCATED_MESSAGE = '<response clipped><NOTE>To save on context only part of this file has been shown to you. You should retry this tool after you have searched inside the file with `grep -n` in order to find the line numbers of what you are looking for.</NOTE>'
+const TRUNCATED_MESSAGE = '<response clipped><NOTE>Only part of this command output is shown.</NOTE>'
 const LOST_PREFIX_MESSAGE = '<response clipped><NOTE>The beginning of this command output was dropped by the terminal scrollback limit. The following text is the earliest retained output.</NOTE>\n'
 const SHELL_RESET_MESSAGE = 'The persistent bash shell was reset; the next bash call starts from the workspace with a fresh current directory and environment.'
 const TIMEOUT_CODE = 'PERSISTENT_BASH_TIMEOUT'
@@ -27,6 +27,7 @@ interface ResolvedConfig {
   backendType: string
   timeoutMs: number
   maxOutputChars: number
+  headChars: number
   description: string
 }
 
@@ -51,11 +52,12 @@ interface PersistentShells {
   reset(owner: Agent, reason: string): Promise<void>
 }
 
-function maybeTruncate(content: string, maxOutputChars: number, incomplete = false): string {
-  if (content.length <= maxOutputChars && !incomplete) return content
-  return content.length <= maxOutputChars
-    ? content + TRUNCATED_MESSAGE
-    : content.slice(0, maxOutputChars) + TRUNCATED_MESSAGE
+function maybeTruncate(content: string, maxOutputChars: number, headChars: number, incomplete: boolean): string {
+  if (content.length <= maxOutputChars) return incomplete ? content + TRUNCATED_MESSAGE : content
+  const tailChars = maxOutputChars - headChars
+  const head = content.slice(0, headChars).replace(/[\uD800-\uDBFF]$/u, '')
+  const tail = tailChars === 0 ? '' : content.slice(-tailChars).replace(/^[\uDC00-\uDFFF]/u, '')
+  return `${head}\n${TRUNCATED_MESSAGE}\n${tail}`
 }
 
 function markers(): CommandMarkers {
@@ -70,6 +72,7 @@ function quoteForBash(value: string): string {
   return `$'${value
     .replaceAll('\\', '\\\\')
     .replaceAll("'", "\\'")
+    .replaceAll('!', '\\041')
     .replaceAll('\r', '\\r')
     .replaceAll('\n', '\\n')}'`
 }
@@ -157,8 +160,8 @@ function retainedScrollback(
   return { text: pages.join('\n'), truncated }
 }
 
-function renderCaptured(output: CapturedOutput, maxOutputChars: number): string {
-  const rendered = maybeTruncate(output.text, maxOutputChars, output.incomplete)
+function renderCaptured(output: CapturedOutput, config: Pick<ResolvedConfig, 'maxOutputChars' | 'headChars'>): string {
+  const rendered = maybeTruncate(output.text, config.maxOutputChars, config.headChars, output.incomplete)
   const withPrefix = output.incomplete && output.text.length > 0
     ? LOST_PREFIX_MESSAGE + rendered
     : rendered
@@ -208,7 +211,7 @@ async function respondToSessionExit(
   await shells.reset(owner, 'persistent bash shell exited')
   return [
     renderShellExitStatus(
-      renderCaptured(partialOutput(snapshot, marker, fallback, fallbackTruncated), config.maxOutputChars),
+      renderCaptured(partialOutput(snapshot, marker, fallback, fallbackTruncated), config),
       status.exitCode,
       status.signal,
     ),
@@ -343,7 +346,7 @@ async function executeCommand(
       const snapshot = retainedScrollback(ctx, owner, id, latest)
       const partial = renderCaptured(
         partialOutput(snapshot, marker, fallback, fallbackTruncated),
-        config.maxOutputChars,
+        config,
       )
       await shells.reset(owner, 'persistent bash command timed out')
       return [
@@ -359,7 +362,7 @@ async function executeCommand(
     }
     if (latest.text.includes(marker.end)) {
       const complete = commandOutput(retainedScrollback(ctx, owner, id, latest), marker)
-      if (complete !== undefined) return renderCaptured(complete, config.maxOutputChars)
+      if (complete !== undefined) return renderCaptured(complete, config)
     }
     if (result.sessionStatus.kind === 'exited') {
       return await respondToSessionExit(
@@ -374,7 +377,7 @@ async function executeCommand(
       const snapshot = retainedScrollback(ctx, owner, id, latest)
       return renderCaptured(
         partialOutput(snapshot, marker, fallback, fallbackTruncated),
-        config.maxOutputChars,
+        config,
       )
     }
     await pause()
@@ -438,8 +441,10 @@ export interface Config {
   backendType?: string
   /** Wall-clock limit for one command (default 300000). */
   timeoutMs?: number
-  /** Maximum returned command-output characters before clipping (default 16000). */
+  /** Retained command-output UTF-16 code units before clipping; fixed diagnostics are additional (default 16000). */
   maxOutputChars?: number
+  /** Leading UTF-16 code units retained when clipping; the suffix uses the remaining output budget (default half, rounded down). */
+  headChars?: number
   /** Model-facing tool description; deployments may describe their environment. */
   description?: string
 }
@@ -449,15 +454,18 @@ export const Config: z<Config> = z.object({
   backendType: z.string().default('shell'),
   timeoutMs: z.number().default(300_000),
   maxOutputChars: z.number().default(16_000),
+  headChars: z.number(),
   description: z.string().default(DEFAULT_DESCRIPTION),
 })
 
 /** Register one owner-scoped persistent `bash` tool. */
 export function apply(ctx: Context, config: Config): void {
+  const maxOutputChars = config.maxOutputChars ?? 16_000
   const resolved: ResolvedConfig = {
     backendType: config.backendType ?? 'shell',
     timeoutMs: config.timeoutMs ?? 300_000,
-    maxOutputChars: config.maxOutputChars ?? 16_000,
+    maxOutputChars,
+    headChars: config.headChars ?? Math.floor(maxOutputChars / 2),
     description: config.description ?? DEFAULT_DESCRIPTION,
   }
   if (resolved.backendType.trim().length === 0) {
@@ -468,6 +476,9 @@ export function apply(ctx: Context, config: Config): void {
   }
   if (!Number.isSafeInteger(resolved.maxOutputChars) || resolved.maxOutputChars <= 0) {
     throw new Error('tool-bash-persistent: maxOutputChars must be a positive safe integer')
+  }
+  if (!Number.isSafeInteger(resolved.headChars) || resolved.headChars < 0 || resolved.headChars > resolved.maxOutputChars) {
+    throw new Error('tool-bash-persistent: headChars must be a safe integer between 0 and maxOutputChars')
   }
   if (resolved.description.trim().length === 0) {
     throw new Error('tool-bash-persistent: description must be non-empty')
