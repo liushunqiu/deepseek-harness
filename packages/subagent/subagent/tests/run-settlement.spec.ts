@@ -25,6 +25,15 @@ describe('outcome mapping helpers', () => {
     })).resolves.toEqual(expected)
   })
 
+  it('keeps an empty final text on completed Task outcomes', async () => {
+    await expect(settleRun({
+      id: SessionId('child-empty'),
+      localAgent: undefined,
+      result: Promise.resolve({ output: [], stopReason: 'completed' }),
+      dispose: () => Promise.resolve(),
+    })).resolves.toEqual({ status: 'completed', output: '' })
+  })
+
   it('settleRun disposes the run before reporting, on both result paths', async () => {
     const order: string[] = []
     const completed = await settleRun({

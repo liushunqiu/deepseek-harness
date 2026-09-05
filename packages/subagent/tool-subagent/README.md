@@ -46,6 +46,7 @@ Load the subagent service, an in-process or remote backend, and this tool; then 
 | `toolName` | `subagent` | Model-facing tool name; distinct for every loaded instance |
 | `modelSelectionSettings` | `false` | Sample the Host's exact-route authorization preference for each new top-level Session; valid only in Agent scope and requires provider `agentOptions` support |
 | `role` | `worker` | Which settings-owned no-selection route this row uses when it selects no model: `worker` takes the general default route, `arbiter` takes the arbiter route and falls back to the general one |
+| `requiresCompletedWorker` | `false` | Bind review to a same-parent Worker's latest successful, nonblank result and prevent Worker/Reviewer overlap, including follow-ups |
 | `enableRunInBackground` | `true` | Expose `run_in_background`; disabling also rejects forced background calls |
 | `backgroundMode` | `one-shot` | Background policy: `one-shot` defaults calls to foreground; `continuable` defaults them to background and requires the provider's `prepareContinuable` capability |
 | `agentOptions` | — | Configured child `provider`, `model`, adapter-owned `reasoningEffort`, and positive `maxTokens` defaults; requires provider `agentOptions` support and overlays any provider-owned route defaults |
@@ -62,6 +63,18 @@ Under `one-shot` policy, an omitted `run_in_background` waits in the foreground 
 Under `continuable` policy, an omitted or `true` `run_in_background` starts a durable child and returns `started subagent <childId>` without waiting for a result; the runtime delivers one settlement notice when the child's Activation ends, and the optional `send_message` tool sends it more work. Set `run_in_background: false` to wait for the result in the foreground.
 
 `maxDepth` caps recursion (default `3`; `0` forbids delegation) and requires a provider with the `depthLimit` capability; `'provider-managed'` leaves the budget to an out-of-process provider. `persona` and `toolFilter` configure every child when the provider supports them, and the tool stays visible at the cap — each attempted start checks the calling agent's current depth and rejects with an errored result.
+
+### Ordered review
+
+Set `requiresCompletedWorker: true` on a dedicated Reviewer row. Its optional `worker_id` names a Worker child id or background job id; omission is accepted only when the parent has exactly one Worker. An ambiguous or unknown reference returns the available Worker ids and task labels. Ordinary rows count as Workers; `role: arbiter` rows without this prerequisite do not.
+
+Admission requires the selected Worker's latest run to complete normally with nonblank final text, after one-shot disposal or the continuable `subagent/end` event. Every Worker must be idle with no pending message delivery. Failed, cancelled, truncated, refused, or empty results cannot authorize review; an older success cannot authorize review of a later failed epoch.
+
+Reviewer startup reserves admission before asynchronous preflight. A Worker cannot start or receive `send_message` while a Reviewer is starting, running, or receiving a follow-up. Messages to an existing Reviewer recheck the same Worker's latest result; a failed message delivery releases its reservation. This prevents repair and review from running against different versions of the selected result.
+
+### Plan mode
+
+For in-process providers, while the calling session is in plan mode (the `plan` session projection is active), every delegation is forced into a read-only child: the tool intersects the configured child tool filter with a deny mask for the currently exposed mutation tools (`write`, `edit`, `str_replace_editor`, `bash`, the background-job controls, the goal/todo drivers, `dev_tool_search`, `read_image`) and dynamically denies any exposed `workflow`, `ralph`, or Cordis package mutation tool, so a plan-mode child cannot mutate host state or hand work to an unmasked orchestration child — `tools.restrict()` enforces it at both visibility and execution. Names absent from the parent Agent's inherited registry are omitted, so deployments without optional plugins do not fail unknown-tool validation. The child's own delegation depth is also capped so deeper spawns cannot escape the mask in a fresh session. A provider that cannot apply a tool filter (no `toolFilter` capability) cannot be made read-only, so the delegation is rejected instead of silently bypassing plan policy. The read/grep/glob evidence-gathering set stays usable, matching plan mode's "delegate only read-only evidence gathering" rule.
 
 ### Selecting a child LLM
 
@@ -108,6 +121,8 @@ The tool's description derives from `provider.inheritsParentContext`: a fresh ch
 | [`src/model-selection-settings.ts`](src/model-selection-settings.ts) | Host-owned opt-in setting sampled for new Sessions |
 | [`src/model-selection-state.ts`](src/model-selection-state.ts) | Session event that records and inherits the sampled decision |
 | [`src/list-models.ts`](src/list-models.ts) | `list_subagent_models` runtime discovery tool |
+| [`src/worker-settlement.ts`](src/worker-settlement.ts) | Parent-isolated Worker result tracking and ordered review admission |
+| [`src/plan-mode-guard.ts`](src/plan-mode-guard.ts) | Read-only tool restrictions and delegation depth in plan mode |
 
 </details>
 
@@ -126,6 +141,7 @@ Read these pages when the package-level contract is not enough; they move from t
 - [Background-first continuable delegation](../../../.agents/notes/implemented/feature/2026-08-11-background-first-continuable-delegation.md) — why continuable work defaults to background.
 - [Model-selected subagent routes](../../../.agents/notes/implemented/feature/2026-08-18-model-selected-subagent-routes.md) — selection policy, inheritance, discovery, and the fork restriction.
 - [User-authorized subagent model routes](../../../.agents/notes/implemented/feature/2026-08-24-user-authorized-subagent-model-routes.md) — settings-owned defaults, per-role routes, and shared discovery registration.
+- [Reviewer admission](../../../.agents/notes/implemented/feature/2026-09-05-reviewer-worker-settlement.md) — result identity, lifecycle accounting, and follow-up serialization.
 
 -----
 
@@ -216,6 +232,7 @@ Append-only; newly visible content follows the reusable request prefix and does 
 These limits define what this tool does not return or enforce; they are current package constraints.
 
 - **Background runs expose no result through this tool** — a one-shot task's final output is collected through the generic task surface, and a continuable child's output stays in its own session, read by its subagent id. The settlement notice states how that child ended and carries any final assistant message, but it is not this call's return value and cannot be awaited here.
+- **Reviewer admission is live tool policy, not report validation** — it does not parse task-specific success fields, verify evidence, or authorize arbitrary service callers. Parent disposal discards admission facts; restored parents need new tracked work. Prompts still supply the final report and review criteria.
 - **Duplicate names across waiting one-shot instances are detected late** (`TODO(subagent-dup-toolname)`) — continuable instances reserve their prompt-section name during plugin application, but preventing provider-registration rollback for waiting one-shot instances requires a registry of intended names.
 - **Shipped fork tools cannot select a child LLM route** — they inherit the parent's provider and model to keep the copied conversation prefix eligible for KV Cache reuse. Re-enable selection only when route changes preserve reuse or expose a bounded recomputation cost.
 - **Non-routing child policy is fixed per instance** — another persona, tool filter, or depth cap requires another distinctly named tool. LLM selection requires an enabled per-Session preference and a provider that advertises `agentOptions`; both in-process providers and DSH SDK advertise it, while ACP, Codex, and Claude Code reject it rather than ignore it.

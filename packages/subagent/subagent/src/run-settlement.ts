@@ -10,6 +10,11 @@ import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { JobOutcome } from '@deepseek-ai/dsh-jobs'
 import type { SubagentResult, SubagentRun } from './types.ts'
 
+type SubagentJobOutcome = JobOutcome & (
+  | { status: 'completed'; output: string }
+  | { status: 'failed' | 'killed' }
+)
+
 /** Flatten a child's final output blocks to the task's final text. */
 function finalText(blocks: ContentBlock[]): string {
   return blocks
@@ -34,7 +39,7 @@ function failureDetail(result: SubagentResult): string {
  * @param result - child terminal result.
  * @returns outcome for the `ctx.jobs` registration.
  */
-function runOutcome(result: SubagentResult): JobOutcome {
+function runOutcome(result: SubagentResult): SubagentJobOutcome {
   switch (result.stopReason) {
     case 'completed':
       return { status: 'completed', output: finalText(result.output) }
@@ -56,10 +61,11 @@ function runOutcome(result: SubagentResult): JobOutcome {
  * Await the child result, dispose the run, then return its task outcome. Result
  * and disposal failures become `failed`; when both fail, both details survive.
  * @param run - live run to settle and release.
- * @returns outcome after child resources are released.
+ * @returns outcome after child resources are released; completion always includes
+ * final text, possibly empty.
  */
-export async function settleRun(run: SubagentRun): Promise<JobOutcome> {
-  let outcome: JobOutcome
+export async function settleRun(run: SubagentRun): Promise<SubagentJobOutcome> {
+  let outcome: SubagentJobOutcome
   try {
     outcome = runOutcome(await run.result)
   } catch (error: unknown) {

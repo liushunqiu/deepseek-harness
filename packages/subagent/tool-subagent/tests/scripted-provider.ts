@@ -46,6 +46,7 @@ export interface Config {
 class ScriptedSubagentProvider implements SubagentProvider {
   readonly capabilities: SubagentCapabilities
   readonly inheritsParentContext: boolean
+  private nextId = 0
 
   constructor(
     readonly name: string,
@@ -89,7 +90,7 @@ class ScriptedSubagentProvider implements SubagentProvider {
     })
 
     return {
-      id: SessionId(`scripted-subagent:${this.name}:${request.parent.id}`),
+      id: SessionId(`scripted-subagent:${this.name}:${request.parent.id}:${++this.nextId}`),
       localAgent: undefined,
       result,
       dispose(): Promise<void> {

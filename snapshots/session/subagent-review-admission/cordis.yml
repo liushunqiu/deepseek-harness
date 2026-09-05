@@ -1,0 +1,10 @@
+- insert:
+    - id: tool-subagent-reviewer
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: spawn
+        toolName: subagent_reviewer
+        role: arbiter
+        requiresCompletedWorker: true
+        enableRunInBackground: false
+        maxDepth: 1

@@ -19,6 +19,7 @@ import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { SessionSeq } from '@deepseek-ai/dsh-session'
 import {
   assertSubagentMaxDepth,
+  delegationDepthOf,
   parentAgentOptionsForDelegation,
   settleRun,
 } from '@deepseek-ai/dsh-subagent'
@@ -40,6 +41,16 @@ import {
   subagentModelSelectionPolicy,
 } from './model-selection-state.ts'
 import type { SubagentModelSelectionPolicy } from './model-selection-state.ts'
+import {
+  isPlanModeActive,
+  planModeMaxDepth,
+  planModeToolFilter,
+  PLAN_MODE_TOOL_FILTER_ERROR,
+  PLAN_MODE_DENY_NAMES,
+  PLAN_MODE_DYNAMIC_DENY_NAMES,
+} from './plan-mode-guard.ts'
+import { workerSettlementTracker } from './worker-settlement.ts'
+import type { WorkerSettlement } from './worker-settlement.ts'
 
 export const name = 'tool-subagent'
 export const inject = ['tools', 'subagents', 'systemPrompt', 'sessionProjections']
@@ -66,6 +77,12 @@ export interface Config {
    * rows without pinning a model id in the preset.
    */
   role?: 'worker' | 'arbiter'
+  /**
+   * Bind each review to a same-parent Worker's latest successful, nonblank
+   * result. Require worker_id when multiple Workers exist; Worker execution
+   * and Reviewer execution, including send_message follow-ups, cannot overlap.
+   */
+  requiresCompletedWorker?: boolean
   /**
    * Expose `run_in_background` (default true). Disabled instances omit the
    * parameter and reject forced background calls.
@@ -115,6 +132,7 @@ export const Config: z<Config> = z.object({
   toolName: z.string().default('subagent'),
   modelSelectionSettings: z.boolean().default(false),
   role: z.union(['worker', 'arbiter'] as const).default('worker'),
+  requiresCompletedWorker: z.boolean().default(false),
   enableRunInBackground: z.boolean().default(true),
   backgroundMode: z.union(['one-shot', 'continuable'] as const).default('one-shot'),
   // Prevent Schemastery from materializing omitted agentOptions as `{}`.
@@ -148,11 +166,16 @@ function outputValueText(values: JsonValue[]): string {
     .join('')
 }
 
-/** Settle pending startup without rejecting the task producer contract. */
-async function settleStart(start: Promise<SubagentRun>, signal: AbortSignal): Promise<JobOutcome> {
+/** Settle startup without rejecting the task producer. */
+async function settleStart(start: Promise<SubagentRun>, signal: AbortSignal, settlement?: WorkerSettlement): Promise<JobOutcome> {
   try {
-    return await settleRun(await start)
+    const run = await start
+    settlement?.publish(run.id, false)
+    const outcome = await settleRun(run)
+    settlement?.settle(outcome.status === 'completed' && !signal.aborted && outcome.output.trim().length > 0)
+    return outcome
   } catch (error: unknown) {
+    settlement?.failStart()
     // Product providers aggregate startup and rollback failures. Cancellation
     // must not turn a failed cleanup into a cleanly killed Job.
     return signal.aborted && !(error instanceof AggregateError)
@@ -361,6 +384,7 @@ export function apply(ctx: Context, config: Config): void {
   if (initialProvider !== undefined) assertSubagentProviderConfiguration(initialProvider)
 
   const install = (runtimeCtx: Context, selection: SubagentModelSelectionPolicy | undefined): void => {
+    const workerTracker = workerSettlementTracker(runtimeCtx)
     const modelSelectionPolicy = selection === undefined ? undefined : { routes: selection.allowedModels }
     const modelSelectionEnabled = selection !== undefined
     if (modelSelectionPolicy !== undefined) acquireListSubagentModels(runtimeCtx, modelSelectionPolicy)
@@ -400,7 +424,10 @@ export function apply(ctx: Context, config: Config): void {
           ? continuable
             ? ' This tool runs in the background by default, immediately returns a durable subagent id, and keeps the child conversation available for later turns. When that run settles, the runtime sends the parent a notice containing its outcome and any final assistant message; `send_message` steers the child\'s nearest step while it is running and starts a turn while it is idle. Set `run_in_background: false` only when your next action depends on receiving the result.'
             : ' This call waits for the result by default. Set `run_in_background: true` to return a job id; collect with `job_output` and stop with `job_kill`.'
-          : ' This call waits for the subagent and returns its result.') + choiceDescription,
+          : ' This call waits for the subagent and returns its result.') + choiceDescription
+          + (config.requiresCompletedWorker === true
+            ? ' Review one Worker\'s latest successfully completed result. Supply worker_id when more than one Worker exists. Wait for all Workers to finish, and do not start or message a Worker until this Reviewer finishes. Follow-ups to this Reviewer stay bound to the same Worker.'
+            : ''),
         parameters: {
           description: {
             type: 'string',
@@ -412,6 +439,12 @@ export function apply(ctx: Context, config: Config): void {
             required: true,
             description: wording.promptDescription,
           },
+          ...config.requiresCompletedWorker === true ? {
+            worker_id: {
+              type: 'string' as const,
+              description: 'The Worker child id or background job id to review. May be omitted only when this parent has exactly one Worker. Include its latest final result and the review requirements in prompt.',
+            },
+          } : {},
           ...modelSelectionEnabled ? {
             provider: {
               type: 'string' as const,
@@ -490,96 +523,169 @@ export function apply(ctx: Context, config: Config): void {
             throw new Error('subagent tool requires a calling agent (exec.agent was undefined)')
           }
 
-          const modelRequest = args as DelegationModelRequest
-          const parentOptions = parentAgentOptionsForDelegation(parent)
-          const requiresRoutePreflight = hasDelegationModelRequest(modelRequest)
+          const workerSettlement = config.requiresCompletedWorker === true
+            ? workerTracker.startReview(parent, args.worker_id)
+            : config.role === 'arbiter' ? undefined : workerTracker.start(parent, args.description)
+          let settlementTransferred = false
+          try {
+            const modelRequest = args as DelegationModelRequest
+            const parentOptions = parentAgentOptionsForDelegation(parent)
+            const requiresRoutePreflight = hasDelegationModelRequest(modelRequest)
             || hasConfiguredLlmSelection(configuredAgentOptions)
-          const configuredChildAgentOptions = requiresRoutePreflight && providerRouteDefaults !== undefined
-            ? { ...providerRouteDefaults, ...configuredAgentOptions }
-            : configuredAgentOptions
-          const requestedChildAgentOptions = requestedAgentOptions(
-            parentOptions,
-            configuredChildAgentOptions,
-            modelRequest,
-            modelSelectionEnabled,
-          )
-          assertAllowedModelSelection(
-            modelSelectionPolicy,
-            parentOptions,
-            requestedChildAgentOptions,
-            modelRequest,
-          )
-          if (requiresRoutePreflight) {
-            const llm = runtimeCtx.get('llm')
-            if (llm === undefined) {
-              throw new Error('cannot resolve the selected child LLM route because the `llm` service is unavailable')
-            }
-            await preflightChildLlmRoute(
-              llm,
+            const configuredChildAgentOptions = requiresRoutePreflight && providerRouteDefaults !== undefined
+              ? { ...providerRouteDefaults, ...configuredAgentOptions }
+              : configuredAgentOptions
+            const requestedChildAgentOptions = requestedAgentOptions(
+              parentOptions,
+              configuredChildAgentOptions,
+              modelRequest,
+              modelSelectionEnabled,
+            )
+            assertAllowedModelSelection(
+              modelSelectionPolicy,
               parentOptions,
               requestedChildAgentOptions,
-              exec.signal,
-              providerRouteDefaults === undefined,
+              modelRequest,
             )
-            if (runtimeCtx.subagents.getProvider(config.provider) !== subagentProvider) {
-              throw new Error(`subagent provider "${config.provider}" changed while resolving the child LLM route; retry the delegation`)
+            if (requiresRoutePreflight) {
+              const llm = runtimeCtx.get('llm')
+              if (llm === undefined) {
+                throw new Error('cannot resolve the selected child LLM route because the `llm` service is unavailable')
+              }
+              await preflightChildLlmRoute(
+                llm,
+                parentOptions,
+                requestedChildAgentOptions,
+                exec.signal,
+                providerRouteDefaults === undefined,
+              )
+              if (runtimeCtx.subagents.getProvider(config.provider) !== subagentProvider) {
+                throw new Error(`subagent provider "${config.provider}" changed while resolving the child LLM route; retry the delegation`)
+              }
             }
-          }
-          exec.signal.throwIfAborted()
-          const maxDepth = typeof config.maxDepth === 'number' ? config.maxDepth : undefined
-          const request = {
-            label: args.description,
-            prompt: [{ type: 'text', text: args.prompt }] as ContentBlock[],
-            parent,
-            ...requestedChildAgentOptions !== undefined ? { agentOptions: requestedChildAgentOptions } : {},
-            ...config.persona !== undefined ? { persona: config.persona } : {},
-            ...config.toolFilter !== undefined ? { toolFilter: config.toolFilter } : {},
-            ...maxDepth !== undefined ? { maxDepth } : {},
-          }
+            const maxDepth = typeof config.maxDepth === 'number' ? config.maxDepth : undefined
+            exec.signal.throwIfAborted()
+            const planModeActive = isPlanModeActive(parent)
+            // Plan-mode hard constraint: while the calling session is planning,
+            // the child must be forced read-only (plan policy requirement), or
+            // the delegation is rejected when the provider cannot enforce a tool
+            // filter. `tools.restrict()` denies at visibility AND execution, so
+            // the mask cannot be re-acquired inside the child. Recursion is
+            // capped at the child's own depth so a deeper spawn cannot escape
+            // the mask in a fresh session.
+            const parentContext = (parent as unknown as { ctx?: Context }).ctx
+            const parentScope = parentContext === undefined ? undefined : scopeOf(parentContext)
+            const inheritedScopes = parentScope === undefined
+              ? []
+              : scopeChainOf(parentScope).slice(1)
+            const availableToolNames = planModeActive
+              ? [...PLAN_MODE_DENY_NAMES, ...PLAN_MODE_DYNAMIC_DENY_NAMES].filter(name => runtimeCtx.tools.get(name) !== undefined
+                || inheritedScopes.some(scope => runtimeCtx.tools.get(name, scope) !== undefined))
+              : undefined
+            const planModeFilter = planModeActive
+              ? planModeToolFilter(config.toolFilter, availableToolNames)
+              : config.toolFilter
+            if (planModeActive && !subagentProvider.capabilities.toolFilter) {
+              throw new Error(`${PLAN_MODE_TOOL_FILTER_ERROR} (provider "${subagentProvider.name}" lacks the toolFilter capability)`)
+            }
+            if (planModeActive && !subagentProvider.capabilities.depthLimit && maxDepth === undefined) {
+              throw new Error(`${PLAN_MODE_TOOL_FILTER_ERROR} (provider "${subagentProvider.name}" lacks the depthLimit capability)`)
+            }
+            const planModeCap = planModeActive
+              ? Math.min(maxDepth ?? Number.POSITIVE_INFINITY, planModeMaxDepth(delegationDepthOf(parent)))
+              : undefined
+            const effectiveMaxDepth = planModeCap ?? maxDepth
+            const request = {
+              label: args.description,
+              prompt: [{ type: 'text', text: args.prompt }] as ContentBlock[],
+              parent,
+              ...requestedChildAgentOptions !== undefined ? { agentOptions: requestedChildAgentOptions } : {},
+              ...config.persona !== undefined ? { persona: config.persona } : {},
+              ...planModeFilter !== undefined ? { toolFilter: planModeFilter } : {},
+              ...effectiveMaxDepth !== undefined ? { maxDepth: effectiveMaxDepth } : {},
+            }
 
-          const runSpec = resolveDelegationRun(args, { backgroundEnabled, continuable })
-          if (runSpec.runInBackground) {
-            if (continuable) {
+            const runSpec = resolveDelegationRun(args, { backgroundEnabled, continuable })
+            if (runSpec.runInBackground) {
+              if (continuable) {
               // Resolves at inbox acceptance: the child owns its own turns from
               // there, so this call neither waits for nor collects a result.
-              const started = await runtimeCtx.subagents.startContinuable({
-                provider: config.provider,
-                label: args.description,
-                request,
+                let started
+                try {
+                  started = await runtimeCtx.subagents.startContinuable({
+                    provider: config.provider,
+                    label: args.description,
+                    request,
+                    signal: exec.signal,
+                  })
+                } catch (error) {
+                  workerSettlement?.failStart()
+                  throw error
+                }
+                if (workerSettlement !== undefined) {
+                  workerSettlement.publish(started.childId, true)
+                  settlementTransferred = true
+                }
+                return { kind: 'continuable' as const, subagentId: started.childId }
+              }
+              const jobs = runtimeCtx.get('jobs')
+              if (jobs === undefined) {
+                workerSettlement?.failStart()
+                throw new Error('background jobs unavailable: load @deepseek-ai/dsh-jobs and @deepseek-ai/dsh-tool-jobs')
+              }
+              // One-shot background child: job preflight finishes before the
+              // starter can spawn, and the task-owned signal covers startup.
+              let id
+              try {
+                id = jobs.start({
+                  kind: 'subagent',
+                  label: args.description,
+                  owner: parent,
+                  run: () => {
+                    const controller = new AbortController()
+                    const start = runtimeCtx.subagents.start(config.provider, { ...request, signal: controller.signal })
+                    return {
+                      cancel: (reason?: string) => {
+                        controller.abort(reason ?? 'background subagent task killed')
+                      },
+                      done: settleStart(start, controller.signal, workerSettlement),
+                    // No readOutput: the child session owns intermediate detail.
+                    }
+                  },
+                })
+              } catch (error) {
+                workerSettlement?.failStart()
+                throw error
+              }
+              workerSettlement?.associateJob(id)
+              settlementTransferred = workerSettlement !== undefined
+              return { kind: 'background' as const, jobId: id }
+            }
+
+            let run: SubagentRun
+            try {
+              run = await runtimeCtx.subagents.start(config.provider, {
+                ...request,
                 signal: exec.signal,
               })
-              return { kind: 'continuable' as const, subagentId: started.childId }
+            } catch (error) {
+              workerSettlement?.failStart()
+              throw error
             }
-            const jobs = runtimeCtx.get('jobs')
-            if (jobs === undefined) {
-              throw new Error('background jobs unavailable: load @deepseek-ai/dsh-jobs and @deepseek-ai/dsh-tool-jobs')
+            workerSettlement?.publish(run.id, false)
+            settlementTransferred = workerSettlement !== undefined
+            try {
+              const result = await settleForegroundRun(run)
+              workerSettlement?.settle(!exec.signal.aborted && outputValueText(result.output).trim().length > 0)
+              return result
+            } catch (error) {
+              workerSettlement?.settle(false)
+              throw error
             }
-            // One-shot background child: job preflight finishes before the
-            // starter can spawn, and the task-owned signal covers startup.
-            const id = jobs.start({
-              kind: 'subagent',
-              label: args.description,
-              owner: parent,
-              run: () => {
-                const controller = new AbortController()
-                const start = runtimeCtx.subagents.start(config.provider, { ...request, signal: controller.signal })
-                return {
-                  cancel: (reason?: string) => {
-                    controller.abort(reason ?? 'background subagent task killed')
-                  },
-                  done: settleStart(start, controller.signal),
-                  // No readOutput: the child session owns intermediate detail.
-                }
-              },
-            })
-            return { kind: 'background' as const, jobId: id }
+          } catch (error) {
+            if (workerSettlement !== undefined && !settlementTransferred) workerSettlement.failStart()
+            throw error
           }
-
-          const run: SubagentRun = await runtimeCtx.subagents.start(config.provider, {
-            ...request,
-            signal: exec.signal,
-          })
-          return settleForegroundRun(run)
         },
       }))
       mounted = { subagentProvider, disposeTool }

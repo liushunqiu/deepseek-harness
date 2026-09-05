@@ -128,9 +128,11 @@ describe('several model-selectable delegation rows on one Agent', () => {
     const ctx = await boot()
     const { agent } = await createAgent(ctx, 'two-rows-conflicting-policy')
 
-    expect(() => acquireListSubagentModels(agent.ctx, {
-      routes: [{ provider: 'beta', model: 'other-model' }],
-    })).toThrow('selectable rows in one scope must use the same model-selection policy')
+    expect(() => {
+      acquireListSubagentModels(agent.ctx, {
+        routes: [{ provider: 'beta', model: 'other-model' }],
+      })
+    }).toThrow('selectable rows in one scope must use the same model-selection policy')
     await expectDiscovery(ctx, agent)
     await ctx.fiber.dispose()
   })

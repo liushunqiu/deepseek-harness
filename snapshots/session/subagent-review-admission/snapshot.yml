@@ -1,0 +1,9 @@
+version: 1
+scenario: subagent-review-admission
+profile: headless
+composition: subagent-review-admission
+recording: authored
+header:
+  class: subagent-review-admission
+  pin: true
+  systemPromptSource: text-turn

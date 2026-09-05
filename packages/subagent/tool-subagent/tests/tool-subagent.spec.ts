@@ -18,8 +18,11 @@ import type { SubagentStartRequest } from '@deepseek-ai/dsh-subagent'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
 import * as SubagentSpawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
 import * as ToolTasks from '@deepseek-ai/dsh-tool-jobs'
+import * as SubagentControl from '@deepseek-ai/dsh-tool-subagent-control'
 import { MockAdapter, textResponse } from '../../../core/agent-loop/tests/mock-adapter.ts'
 import { loadStoredSession } from '../../subagent/tests/persistence-helpers.ts'
+import { TestSessionQuery } from '../../tool-subagent-control/tests/test-session-query.ts'
+import { parkParent } from '../../tool-subagent-control/tests/park-parent.ts'
 import * as mock from './scripted-provider.ts'
 import * as tool from '../src/index.ts'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
@@ -83,7 +86,7 @@ describe('dsh-tool-subagent', () => {
     if (result.isError) throw new Error('expected subagent success')
     expect(result.value).toEqual({
       kind: 'foreground',
-      runId: 'scripted-subagent:mock:parent-1',
+      runId: 'scripted-subagent:mock:parent-1:1',
       output: [{ type: 'text', text: 'child says hi' }],
     })
     expect(text(result)).toBe('child says hi')
@@ -894,6 +897,267 @@ describe('dsh-tool-subagent background mode', () => {
     expect(text(again)).toBe('background answer\n[status: completed]')
   })
 
+  it('blocks a Reviewer until a foreground Worker settles', async () => {
+    let releaseWorker!: () => void
+    let workerStarted!: () => void
+    const workerStartedPromise = new Promise<void>((resolve) => { workerStarted = resolve })
+    const workerGate = new Promise<void>((resolve) => { releaseWorker = resolve })
+    const ctx = await setup({ provider: 'mock' }, {
+      onStart: async (request) => {
+        if (request.label === 'worker') {
+          workerStarted()
+          await workerGate
+        }
+      },
+    })
+    tool.apply(ctx, {
+      provider: 'mock',
+      toolName: 'subagent_reviewer',
+      requiresCompletedWorker: true,
+      maxDepth: 'provider-managed',
+    })
+    const parent = fakeAgent('review-parent')
+    const worker = callSubagent(ctx, { description: 'worker', prompt: 'collect evidence' }, { agent: parent })
+    await workerStartedPromise
+
+    const whileRunning = await callSubagent(ctx, { description: 'review', prompt: 'judge evidence' }, {
+      agent: parent,
+      toolName: 'subagent_reviewer',
+    })
+    expect(whileRunning.isError).toBe(true)
+    expect(text(whileRunning)).toContain('latest run to complete successfully')
+
+    releaseWorker()
+    const workerResult = await worker
+    expect(workerResult.isError).toBe(false)
+    const afterSettlement = await callSubagent(ctx, { description: 'review', prompt: 'judge evidence' }, {
+      agent: parent,
+      toolName: 'subagent_reviewer',
+    })
+    expect(afterSettlement.isError).toBe(false)
+  })
+
+  it('waits for every concurrent Worker before admitting a Reviewer', async () => {
+    let releaseWorkers!: () => void
+    let workersStarted!: () => void
+    const workerGate = new Promise<void>((resolve) => { releaseWorkers = resolve })
+    const workersStartedPromise = new Promise<void>((resolve) => { workersStarted = resolve })
+    const startedWorkers: string[] = []
+    const ctx = await setup({ provider: 'mock', toolName: 'subagent_worker' }, {
+      onStart: async (request) => {
+        if (request.label !== 'worker-one' && request.label !== 'worker-two') return
+        startedWorkers.push(request.label)
+        if (startedWorkers.length === 2) workersStarted()
+        await workerGate
+      },
+    })
+    tool.apply(ctx, {
+      provider: 'mock',
+      toolName: 'subagent_reviewer',
+      requiresCompletedWorker: true,
+      maxDepth: 'provider-managed',
+    })
+    const parent = fakeAgent('concurrent-review-parent')
+    const workers = Promise.all([
+      callSubagent(ctx, { description: 'worker-one', prompt: 'collect first evidence' }, {
+        agent: parent,
+        toolName: 'subagent_worker',
+      }),
+      callSubagent(ctx, { description: 'worker-two', prompt: 'collect second evidence' }, {
+        agent: parent,
+        toolName: 'subagent_worker',
+      }),
+    ])
+    await workersStartedPromise
+    expect(startedWorkers.sort()).toEqual(['worker-one', 'worker-two'])
+
+    const whileRunning = await callSubagent(ctx, { description: 'review', prompt: 'judge evidence' }, {
+      agent: parent,
+      toolName: 'subagent_reviewer',
+    })
+    expect(whileRunning.isError).toBe(true)
+    expect(text(whileRunning)).toContain('worker_id')
+
+    releaseWorkers()
+    const settledWorkers = await workers
+    expect(settledWorkers.every(result => !result.isError)).toBe(true)
+    const firstWorkerId = (settledWorkers[0].value as { runId: string }).runId
+    const afterSettlement = await callSubagent(ctx, { description: 'review', prompt: 'judge evidence', worker_id: firstWorkerId }, {
+      agent: parent,
+      toolName: 'subagent_reviewer',
+    })
+    expect(afterSettlement.isError).toBe(false)
+  })
+
+  it('blocks a Reviewer until a one-shot background Worker job settles', async () => {
+    let releaseWorker!: () => void
+    let workerStarted!: () => void
+    const workerStartedPromise = new Promise<void>((resolve) => { workerStarted = resolve })
+    const workerGate = new Promise<void>((resolve) => { releaseWorker = resolve })
+    const ctx = await backgroundSetup({ provider: 'mock' }, {
+      reply: 'background worker answer',
+      onStart: async (request) => {
+        if (request.label === 'worker') {
+          workerStarted()
+          await workerGate
+        }
+      },
+    })
+    tool.apply(ctx, {
+      provider: 'mock',
+      toolName: 'subagent_reviewer',
+      requiresCompletedWorker: true,
+      maxDepth: 'provider-managed',
+    })
+    const parent = ownerAgent(ctx, 'background-review-parent')
+    const started = await callSubagent(ctx, {
+      description: 'worker',
+      prompt: 'collect evidence',
+      run_in_background: true,
+    }, { agent: parent })
+    expect(started.isError).toBe(false)
+    await workerStartedPromise
+
+    const whileRunning = await callSubagent(ctx, { description: 'review', prompt: 'judge evidence' }, {
+      agent: parent,
+      toolName: 'subagent_reviewer',
+    })
+    expect(whileRunning.isError).toBe(true)
+
+    releaseWorker()
+    const collected = await ctx.tools.execute({
+      signal: testToolSignal,
+      callId: ToolCallId('collect-review-worker'),
+      name: 'job_output',
+      arguments: { job_id: 'subagent-1', wait: true },
+      agent: parent,
+    })
+    expect(text(collected)).toContain('[status: completed]')
+    const afterSettlement = await callSubagent(ctx, { description: 'review', prompt: 'judge evidence' }, {
+      agent: parent,
+      toolName: 'subagent_reviewer',
+    })
+    expect(afterSettlement.isError).toBe(false)
+  })
+
+  it('does not unlock a Reviewer when the Worker fails during startup', async () => {
+    const ctx = await setup({ provider: 'mock' })
+    ctx.subagents.registerProvider({
+      name: 'broken-review-worker',
+      capabilities: { agentOptions: false, outputSchema: false, depthLimit: false, toolFilter: false, persona: false },
+      inheritsParentContext: false,
+      start: async () => { throw new Error('worker startup failed') },
+    })
+    tool.apply(ctx, {
+      provider: 'broken-review-worker',
+      toolName: 'subagent_broken_worker',
+      maxDepth: 'provider-managed',
+    })
+    tool.apply(ctx, {
+      provider: 'broken-review-worker',
+      toolName: 'subagent_broken_reviewer',
+      requiresCompletedWorker: true,
+      maxDepth: 'provider-managed',
+    })
+    const parent = fakeAgent('failed-review-parent')
+    const worker = await callSubagent(ctx, { description: 'worker', prompt: 'collect evidence' }, {
+      agent: parent,
+      toolName: 'subagent_broken_worker',
+    })
+    expect(worker.isError).toBe(true)
+    const reviewer = await callSubagent(ctx, { description: 'review', prompt: 'judge evidence' }, {
+      agent: parent,
+      toolName: 'subagent_broken_reviewer',
+    })
+    expect(reviewer.isError).toBe(true)
+    expect(text(reviewer)).toContain('Start a Worker first')
+  })
+
+  it.each(['error', 'aborted', 'max-tokens', 'refusal', 'completed'] as const)('rejects review after a %s Worker without a usable final result', async (stopReason) => {
+    const ctx = await setup({ provider: 'mock' }, { stopReason, reply: stopReason === 'completed' ? ' \n ' : 'partial evidence' })
+    try {
+      await ctx.plugin(tool, { provider: 'mock', toolName: 'subagent_reviewer', requiresCompletedWorker: true })
+      const parent = fakeAgent('unusable-worker')
+      await callSubagent(ctx, { description: 'worker', prompt: 'collect evidence' }, { agent: parent })
+      const review = await callSubagent(ctx, { description: 'review', prompt: 'check evidence' }, {
+        agent: parent, toolName: 'subagent_reviewer',
+      })
+      expect(review.isError).toBe(true)
+      expect(text(review)).toContain('latest run to complete successfully with nonblank final text')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('rejects review after a completed background Worker with blank output', async () => {
+    const ctx = await backgroundSetup({ provider: 'mock' }, { reply: ' \n ' })
+    try {
+      await ctx.plugin(tool, { provider: 'mock', toolName: 'subagent_reviewer', requiresCompletedWorker: true })
+      const parent = ownerAgent(ctx, 'blank-background-worker')
+      const worker = await callSubagent(ctx, { description: 'worker', prompt: 'collect evidence', run_in_background: true }, { agent: parent })
+      const jobId = (worker.value as { jobId: string }).jobId
+      await callSubagent(ctx, { job_id: jobId, wait: true }, { agent: parent, toolName: 'job_output' })
+      const review = await callSubagent(ctx, { description: 'review', prompt: 'check evidence', worker_id: jobId }, {
+        agent: parent, toolName: 'subagent_reviewer',
+      })
+      expect(review.isError).toBe(true)
+      expect(text(review)).toContain('latest run to complete successfully with nonblank final text')
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('does not reserve a Worker slot for a Reviewer that fails after admission', async () => {
+    const ctx = await setup({ provider: 'mock' })
+    const parent = fakeAgent('review-failure-parent')
+    const worker = await callSubagent(ctx, { description: 'worker', prompt: 'collect evidence' }, { agent: parent })
+    expect(worker.isError).toBe(false)
+    ctx.subagents.registerProvider({
+      name: 'review-failure',
+      capabilities: { agentOptions: false, outputSchema: false, depthLimit: false, toolFilter: false, persona: false },
+      inheritsParentContext: false,
+      start: async () => { throw new Error('review startup failed') },
+    })
+    tool.apply(ctx, {
+      provider: 'review-failure',
+      toolName: 'subagent_review_failure',
+      requiresCompletedWorker: true,
+      maxDepth: 'provider-managed',
+    })
+
+    const reviewer = await callSubagent(ctx, { description: 'review', prompt: 'judge evidence' }, {
+      agent: parent,
+      toolName: 'subagent_review_failure',
+    })
+    expect(reviewer.isError).toBe(true)
+    expect(text(reviewer)).toContain('review startup failed')
+  })
+
+  it('isolates Reviewer admission between parent Agents', async () => {
+    const ctx = await setup({ provider: 'mock' }, { reply: 'worker answer' })
+    tool.apply(ctx, {
+      provider: 'mock',
+      toolName: 'subagent_reviewer',
+      requiresCompletedWorker: true,
+      maxDepth: 'provider-managed',
+    })
+    const alice = fakeAgent('alice-review-parent')
+    const bob = fakeAgent('bob-review-parent')
+    const aliceWorker = await callSubagent(ctx, { description: 'worker', prompt: 'collect evidence' }, { agent: alice })
+    expect(aliceWorker.isError).toBe(false)
+    const aliceReview = await callSubagent(ctx, { description: 'review', prompt: 'judge evidence' }, {
+      agent: alice,
+      toolName: 'subagent_reviewer',
+    })
+    expect(aliceReview.isError).toBe(false)
+    const bobReview = await callSubagent(ctx, { description: 'review', prompt: 'judge evidence' }, {
+      agent: bob,
+      toolName: 'subagent_reviewer',
+    })
+    expect(bobReview.isError).toBe(true)
+    expect(text(bobReview)).toContain('Start a Worker first')
+  })
+
   it('preserves provider diagnostics in one-shot background failure detail', async () => {
     const ctx = await backgroundSetup({ provider: 'mock' }, {
       reply: 'not background output',
@@ -1181,7 +1445,7 @@ describe('dsh-tool-subagent continuable background mode', () => {
   })
 
   /** Boot the real continuable stack without any model-facing follow-up adapter. */
-  async function continuableSetup() {
+  async function continuableSetup(replies: string[] = ['continuable answer']) {
     const ctx = await projectedContext()
     await mountAgentLoopTestDependencies(ctx)
     const root = mkdtempSync(path.join(tmpdir(), 'dsh-tool-subagent-continuable-'))
@@ -1193,9 +1457,7 @@ describe('dsh-tool-subagent continuable background mode', () => {
     await ctx.plugin(LocalJobRegistry)
     await ctx.plugin(ToolTasks, {})
     await ctx.plugin(tool, { provider: 'spawn', backgroundMode: 'continuable' })
-    ctx.llm.registerAdapter(['mock'], new MockAdapter([
-      textResponse('continuable answer'),
-    ]))
+    ctx.llm.registerAdapter(['mock'], new MockAdapter(replies.map(textResponse)))
     const parent = await ctx.agentLoop.create(SessionId('parent'), { provider: 'mock', model: 'mock' })
     return { ctx, parent }
   }
@@ -1208,6 +1470,26 @@ describe('dsh-tool-subagent continuable background mode', () => {
       name: 'subagent',
       arguments: { description: 'do work', prompt: 'Reply OK' },
     })).toEqual({ kind: 'parallel' })
+  })
+
+  it('does not count a continuable arbiter as a completed Worker', async () => {
+    const { ctx, parent } = await continuableSetup(['arbitration'])
+    try {
+      parkParent(ctx, parent)
+      await ctx.plugin(tool, { provider: 'spawn', toolName: 'subagent_arbiter', role: 'arbiter', backgroundMode: 'continuable' })
+      await ctx.plugin(tool, { provider: 'spawn', toolName: 'subagent_reviewer', requiresCompletedWorker: true })
+      const arbiter = await callSubagent(ctx, { description: 'arbitrate', prompt: 'judge independently' }, {
+        agent: parent, toolName: 'subagent_arbiter',
+      })
+      expect(arbiter.isError).toBe(false)
+      const review = await callSubagent(ctx, { description: 'review', prompt: 'check evidence' }, {
+        agent: parent, toolName: 'subagent_reviewer',
+      })
+      expect(review.isError).toBe(true)
+      expect(text(review)).toContain('Start a Worker first')
+    } finally {
+      await ctx.fiber.dispose()
+    }
   })
 
   it('defaults continuable delegation to background and returns only its durable id', async () => {
@@ -1251,6 +1533,52 @@ describe('dsh-tool-subagent continuable background mode', () => {
     expect(loaded.events.some(event => event.type === 'assistant/message')).toBe(true)
   })
 
+  it('unlocks a continuable Reviewer only after the Worker emits subagent/end', async () => {
+    const { ctx, parent } = await continuableSetup(['continuable answer', 'reviewed'])
+    await ctx.plugin(tool, {
+      provider: 'spawn',
+      toolName: 'subagent_reviewer',
+      backgroundMode: 'continuable',
+      requiresCompletedWorker: true,
+      maxDepth: 1,
+    })
+    const childIds = new Set<SessionId>()
+    const settledIds = new Set<SessionId>()
+    let settleWorkers!: () => void
+    const workersSettled = new Promise<void>((resolve) => { settleWorkers = resolve })
+    ctx.on('subagent/end', (info) => {
+      if (!childIds.has(info.id)) return
+      settledIds.add(info.id)
+      if (settledIds.size === childIds.size && childIds.size === 1) settleWorkers()
+    })
+
+    const started = await callSubagent(ctx, {
+      description: 'continuable worker',
+      prompt: 'collect evidence',
+    }, { agent: parent })
+    expect(started.isError).toBe(false)
+    const match = /^started subagent (\S+)$/.exec(text(started))
+    expect(match).not.toBeNull()
+    childIds.add(SessionId(match![1]!))
+
+    const whileRunning = await callSubagent(ctx, {
+      description: 'review',
+      prompt: 'judge evidence',
+    }, { agent: parent, toolName: 'subagent_reviewer' })
+    expect(whileRunning.isError).toBe(true)
+    expect(text(whileRunning)).toContain('latest run to complete successfully')
+    await workersSettled
+    const reviewerStarted = await callSubagent(ctx, {
+      description: 'review',
+      prompt: 'judge evidence',
+    }, { agent: parent, toolName: 'subagent_reviewer' })
+    expect(reviewerStarted.isError).toBe(false)
+    const reviewerMatch = /^started subagent (\S+)$/.exec(text(reviewerStarted))
+    expect(reviewerMatch).not.toBeNull()
+    childIds.add(SessionId(reviewerMatch![1]!))
+    await vi.waitFor(() => { expect(settledIds.has(SessionId(reviewerMatch![1]!))).toBe(true) }, { timeout: 5_000 })
+  })
+
   it('hides continuable guidance when the current agent cannot see the tool', async () => {
     const { ctx, parent } = await continuableSetup()
     parent.ctx.tools.restrict({ deny: ['subagent'] })
@@ -1258,6 +1586,80 @@ describe('dsh-tool-subagent continuable background mode', () => {
     expect(ctx.tools.get('subagent', parent)).toBeUndefined()
     const assembly = await ctx.systemPrompt.assemble(assembleContextFor(parent))
     expect(assembly.sections.find(section => section.name === 'tool:subagent')?.text).toBe('')
+  })
+
+  it('rechecks real Reviewer follow-ups while a Worker repair is queued and running', async () => {
+    const { ctx, parent } = await continuableSetup(['initial evidence', 'initial review', 'repaired evidence', 'final review'])
+    let allowDelivery!: () => void
+    let deliveryStarted!: () => void
+    let allowRepair!: () => void
+    let repairStarted!: () => void
+    const deliveryGate = new Promise<void>((resolve) => { allowDelivery = resolve })
+    const deliveryReached = new Promise<void>((resolve) => { deliveryStarted = resolve })
+    const repairGate = new Promise<void>((resolve) => { allowRepair = resolve })
+    const repairReached = new Promise<void>((resolve) => { repairStarted = resolve })
+    let repairCall: ReturnType<typeof callSubagent> | undefined
+    try {
+      parkParent(ctx, parent)
+      await ctx.plugin(TestSessionQuery)
+      await ctx.plugin(SubagentControl)
+      await ctx.plugin(tool, {
+        provider: 'spawn', toolName: 'subagent_reviewer', backgroundMode: 'continuable',
+        requiresCompletedWorker: true, maxDepth: 1,
+      })
+      const terminalCounts = new Map<SessionId, number>()
+      ctx.on('subagent/end', (info) => { terminalCounts.set(info.id, (terminalCounts.get(info.id) ?? 0) + 1) })
+      const worker = await callSubagent(ctx, { description: 'worker', prompt: 'collect evidence' }, { agent: parent })
+      expect(worker.isError).toBe(false)
+      const workerId = SessionId((worker.value as { subagentId: string }).subagentId)
+      await vi.waitFor(() => { expect(terminalCounts.get(workerId)).toBe(1) })
+      const review = await callSubagent(ctx, { description: 'review', prompt: 'check evidence', worker_id: workerId }, {
+        agent: parent, toolName: 'subagent_reviewer',
+      })
+      expect(review.isError).toBe(false)
+      const reviewerId = SessionId((review.value as { subagentId: string }).subagentId)
+      await vi.waitFor(() => { expect(terminalCounts.get(reviewerId)).toBe(1) })
+
+      ctx.on('tools/execute', async (exec, next) => {
+        if (exec.name === 'send_message' && (exec.arguments as { message: string }).message === 'repair') {
+          deliveryStarted()
+          await deliveryGate
+        }
+        return next()
+      })
+      ctx.on('agent/pre-step', async ({ agent }, next) => {
+        if (agent.id === workerId) {
+          repairStarted()
+          await repairGate
+        }
+        return next()
+      })
+      const send = (agentId: SessionId, message: string) => callSubagent(ctx, { agent_id: agentId, message }, {
+        agent: parent, toolName: 'send_message',
+      })
+      repairCall = send(workerId, 'repair')
+      await deliveryReached
+      const queuedReview = await send(reviewerId, 'review queued repair')
+      expect(queuedReview.isError).toBe(true)
+      expect(text(queuedReview)).toContain('receiving a follow-up')
+      allowDelivery()
+      const repairResult = await repairCall
+      expect(repairResult.isError, text(repairResult)).toBe(false)
+      await repairReached
+      const runningReview = await send(reviewerId, 'review running repair')
+      expect(runningReview.isError).toBe(true)
+      expect(text(runningReview)).toContain('latest run')
+      allowRepair()
+      await vi.waitFor(() => { expect(terminalCounts.get(workerId)).toBe(2) })
+      const finalReview = await send(reviewerId, 'review repaired evidence')
+      expect(finalReview.isError, text(finalReview)).toBe(false)
+      await vi.waitFor(() => { expect(terminalCounts.get(reviewerId)).toBe(2) })
+    } finally {
+      allowDelivery()
+      allowRepair()
+      await Promise.allSettled(repairCall === undefined ? [] : [repairCall])
+      await ctx.fiber.dispose()
+    }
   })
 
   it('waits for a continuable provider only when run_in_background is explicitly false', async () => {

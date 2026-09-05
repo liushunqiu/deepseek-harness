@@ -2919,6 +2919,12 @@ export interface Config {
    */
   role?: 'worker' | 'arbiter'
   /**
+   * Bind each review to a same-parent Worker's latest successful, nonblank
+   * result. Require worker_id when multiple Workers exist; Worker execution
+   * and Reviewer execution, including send_message follow-ups, cannot overlap.
+   */
+  requiresCompletedWorker?: boolean
+  /**
    * Expose `run_in_background` (default true). Disabled instances omit the
    * parameter and reject forced background calls.
    */
@@ -2965,7 +2971,7 @@ export interface Config {
 
 Depends on: [`AgentOptions`](subsystems/core.md)
 
-Source: [`packages/subagent/tool-subagent/src/index.ts:48`](../packages/subagent/tool-subagent/src/index.ts)
+Source: [`packages/subagent/tool-subagent/src/index.ts:59`](../packages/subagent/tool-subagent/src/index.ts)
 
 <a id="deepseek-aidsh-tool-terminal"></a>
 

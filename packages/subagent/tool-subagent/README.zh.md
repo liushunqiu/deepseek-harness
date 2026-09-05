@@ -46,6 +46,7 @@ kind: "package-reference"
 | `toolName` | `subagent` | 面向模型的工具名称；每个已加载实例必须不同 |
 | `modelSelectionSettings` | `false` | 为每个新顶层 Session 读取宿主的精确路由授权偏好；只在 Agent 作用域内有效，并要求提供方支持 `agentOptions` |
 | `role` | `worker` | 本行在调用未选择模型时使用哪条由设置持有的免选路由：`worker` 取通用默认路由，`arbiter` 取仲裁路由并在未设置时回退到通用路由 |
+| `requiresCompletedWorker` | `false` | 将复核绑定到同一父 Agent 下 Worker 最新的正常完成且非空白结果，并禁止 Worker/Reviewer 重叠运行，包括续轮 |
 | `enableRunInBackground` | `true` | 公开 `run_in_background`；禁用时也会拒绝强制后台调用 |
 | `backgroundMode` | `one-shot` | 后台策略：`one-shot` 默认前台调用；`continuable` 默认后台调用，并要求提供方具备 `prepareContinuable` 能力 |
 | `agentOptions` | — | 配置的子级 `provider`、`model`、适配器所有的 `reasoningEffort` 与正整数 `maxTokens` 默认值；要求提供方支持 `agentOptions`，并会覆盖提供方持有的路由默认值 |
@@ -62,6 +63,18 @@ kind: "package-reference"
 `continuable` 策略下，省略或为 `true` 的 `run_in_background` 会启动一个持久化子 agent，并返回 `started subagent <childId>`，不等待结果；子 agent 的 Activation 结束时，运行时投递一条结算通知，可选的 `send_message` 工具会向它发送更多工作。把 `run_in_background` 设为 `false` 可在前台等待结果。
 
 `maxDepth` 限制递归深度（默认 `3`；`0` 禁止委派），并要求提供方具备 `depthLimit` 能力；`'provider-managed'` 把预算留给进程外提供方。当提供方支持时，`persona` 与 `toolFilter` 会配置每个子 agent；工具在达到上限时仍然可见——每次尝试启动都会检查调用 agent 的当前深度，被拒绝时返回出错的工具结果。
+
+### 顺序复核
+
+为专用 Reviewer 行设置 `requiresCompletedWorker: true`。可选的 `worker_id` 指定 Worker 子会话 id 或后台 job id；只有父级恰好拥有一个 Worker 时才允许省略。引用不明确或不存在时，错误会列出可用 Worker id 与任务标签。普通工具行计为 Worker；未启用此前置条件的 `role: arbiter` 行不计入。
+
+准入要求所选 Worker 最新一次运行正常完成并产出非空白最终文本，且一次性运行的资源已释放，或可继续运行已发布 `subagent/end`。所有 Worker 都必须空闲且没有待完成的消息投递。失败、取消、截断、拒绝或空结果均不能授权复核；旧轮次成功不能授权对后续失败轮次的复核。
+
+Reviewer 在异步预检前预留准入。Reviewer 正在启动、运行或接收续轮消息时，Worker 不能启动或接收 `send_message`。向已有 Reviewer 发送消息会重新检查同一 Worker 的最新结果；投递失败会释放预留。这避免修复与复核针对所选结果的不同版本重叠执行。
+
+### 计划模式(Plan mode)
+
+对于进程内提供方,当调用会话处于计划模式(`plan` 会话投影为 active)时,每次委派都会被强制为只读子 agent:工具会把配置的子工具过滤器与当前已暴露的变更工具 deny 掩码(`write`、`edit`、`str_replace_editor`、`bash`、后台任务控制、goal/todo 驱动、`dev_tool_search`、`read_image`)相交,并动态拒绝父 Agent 已暴露的 `workflow`、`ralph` 或 Cordis 包变更工具,使计划模式下的子 agent 既无法修改宿主状态,也不能把工作交给未受掩码限制的编排子 agent——`tools.restrict()` 同时在可见性与执行两层强制。父 Agent 继承工具注册表中不存在的名称会被省略,因此未加载可选插件的预设不会因未知工具校验失败。子 agent 自身的委派深度也会被限制,防止更深的 spawn 在新会话中绕过掩码。无法应用工具过滤器(不具备 `toolFilter` 能力)的提供方无法被强制只读,因此该委派会被拒绝,而不是静默绕过计划策略。read/grep/glob 读取取证集合保持可用,契合计划模式"只委派只读取证"的规则。
 
 ### 选择子级 LLM
 
@@ -108,6 +121,8 @@ kind: "package-reference"
 | [`src/model-selection-settings.ts`](src/model-selection-settings.ts) | 为新 Session 读取的宿主所有 opt-in 设置 |
 | [`src/model-selection-state.ts`](src/model-selection-state.ts) | 记录并继承已读取决定的 Session 事件 |
 | [`src/list-models.ts`](src/list-models.ts) | `list_subagent_models` 运行时发现工具 |
+| [`src/worker-settlement.ts`](src/worker-settlement.ts) | 按父级隔离的 Worker 结果跟踪与顺序复核准入 |
+| [`src/plan-mode-guard.ts`](src/plan-mode-guard.ts) | 计划模式下的只读工具限制与委派深度 |
 
 </details>
 
@@ -126,6 +141,7 @@ kind: "package-reference"
 - [后台优先的可继续委派](../../../.agents/notes/implemented/feature/2026-08-11-background-first-continuable-delegation.zh.md)——可继续工作为何默认在后台运行。
 - [模型选择 subagent 路由](../../../.agents/notes/implemented/feature/2026-08-18-model-selected-subagent-routes.zh.md)——选择策略、继承、发现与 fork 限制。
 - [用户授权的 subagent 模型路由](../../../.agents/notes/implemented/feature/2026-08-24-user-authorized-subagent-model-routes.zh.md)——设置自有默认路由、按角色路由与共享发现注册。
+- [Reviewer 准入](../../../.agents/notes/implemented/feature/2026-09-05-reviewer-worker-settlement.zh.md)——结果身份、生命周期记账与续轮串行化。
 
 -----
 
@@ -216,6 +232,7 @@ Use subagent in the background by default. Start independent delegations togethe
 这些限制说明本工具不返回或不强制执行什么；它们是当前包约束。
 
 - **后台运行不通过本工具公开结果**——一次性任务的最终输出通过通用 Task 接口收集，可继续子 agent 的输出留在其自身会话中，按其 subagent id 读取。结算通知会说明该子 agent 如何结束，并携带可能存在的最终 assistant 消息，但它不是本次调用的返回值，也无法在此等待。
+- **Reviewer 准入是实时工具策略，不是报告校验**——它不解析任务特定的成功字段、不验证证据，也不授权任意服务调用方。父 Agent 释放后准入记录随之丢弃；恢复后的父级需要新的受跟踪工作。prompt 仍须提供最终报告与复核标准。
 - **等待中的一次性实例较晚才发现重复名称**（`TODO(subagent-dup-toolname)`）——可继续实例会在插件应用期间预留提示词 section 名称，但若要阻止等待中的一次性实例回滚提供方注册，仍需要一份预期名称注册表。
 - **随附 fork 工具不能选择子级 LLM 路由**——它们继承父级提供方与模型，使复制的对话前缀仍有资格复用 KV Cache。仅当路由变更能保留复用或公开有界重算成本时，才重新启用选择。
 - **非路由子 agent 策略按实例固定**——另一个 persona、工具过滤器或深度上限需要另一个名称不同的工具。LLM 选择要求启用逐 Session 偏好，且提供方必须声明 `agentOptions`；两个进程内提供方和 DSH SDK 会声明该能力，而 ACP、Codex 与 Claude Code 会拒绝它，而不是忽略它。
